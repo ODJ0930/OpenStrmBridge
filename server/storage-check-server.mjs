@@ -17,12 +17,16 @@ import { fileURLToPath } from 'node:url'
 
 const DEFAULT_PORT = 5174
 const port = Number.parseInt(process.env.OPENSTRMBRIDGE_BACKEND_PORT ?? '', 10) || DEFAULT_PORT
+const host = process.env.OPENSTRMBRIDGE_BACKEND_HOST?.trim() || '127.0.0.1'
 const dataDir = process.env.OPENSTRMBRIDGE_DATA_DIR ?? path.join(process.cwd(), 'data')
 const webDir = process.env.OPENSTRMBRIDGE_WEB_DIR?.trim() || path.join(process.cwd(), 'dist')
 const settingsFile = path.join(dataDir, 'settings.json')
 const storagesFile = path.join(dataDir, 'storages.json')
 const tasksFile = path.join(dataDir, 'tasks.json')
 const strmIndexFile = path.join(dataDir, 'strm-index.json')
+const runtimeConfigFile =
+  process.env.OPENSTRMBRIDGE_RUNTIME_CONFIG_FILE?.trim() ||
+  path.join(dataDir, 'runtime-config.json')
 const ge2oDataDir = path.join(dataDir, 'go-emby2openlist')
 const ge2oConfigFile = path.join(ge2oDataDir, 'config.yml')
 const ge2oCustomCssDir = path.join(ge2oDataDir, 'custom-css')
@@ -4027,6 +4031,90 @@ function sendStaticBuffer(response, request, filePath, content) {
   }
 }
 
+function normalizeRuntimeConfig(config) {
+  const normalized = {}
+  const apiBaseUrl = String(config?.apiBaseUrl ?? '').trim()
+  const username = String(config?.auth?.username ?? '').trim()
+  const password = config?.auth?.password
+  const revision = String(config?.auth?.revision ?? '').trim()
+
+  if (apiBaseUrl) {
+    normalized.apiBaseUrl = apiBaseUrl
+  }
+
+  if (username && password !== undefined) {
+    normalized.auth = {
+      password: String(password),
+      username,
+    }
+
+    if (revision) {
+      normalized.auth.revision = revision
+    }
+  }
+
+  return normalized
+}
+
+async function readRuntimeConfig() {
+  let fileConfig = {}
+
+  try {
+    fileConfig = JSON.parse(await readFile(runtimeConfigFile, 'utf8'))
+  } catch (error) {
+    if (error?.code !== 'ENOENT') {
+      console.warn(`Unable to read runtime config: ${error.message}`)
+    }
+  }
+
+  const envUsername = process.env.OPENSTRMBRIDGE_LOGIN_USER?.trim()
+  const envPassword = process.env.OPENSTRMBRIDGE_LOGIN_PASSWORD
+  const envRevision = process.env.OPENSTRMBRIDGE_AUTH_REVISION?.trim()
+  const envApiBaseUrl = process.env.OPENSTRMBRIDGE_API_BASE_URL?.trim()
+  const envConfig = {}
+
+  if (envApiBaseUrl) {
+    envConfig.apiBaseUrl = envApiBaseUrl
+  }
+
+  if (envUsername && envPassword !== undefined) {
+    envConfig.auth = {
+      password: envPassword,
+      revision: envRevision,
+      username: envUsername,
+    }
+  }
+
+  return normalizeRuntimeConfig({
+    ...envConfig,
+    ...fileConfig,
+    auth: {
+      ...envConfig.auth,
+      ...fileConfig.auth,
+    },
+  })
+}
+
+async function serveRuntimeConfig(request, response) {
+  const runtimeConfig = await readRuntimeConfig()
+  const content = Buffer.from(
+    `window.__OPENSTRMBRIDGE_RUNTIME_CONFIG__ = ${JSON.stringify(runtimeConfig)};\n`,
+    'utf8',
+  )
+
+  response.writeHead(200, {
+    'Cache-Control': 'no-cache',
+    'Content-Length': content.byteLength,
+    'Content-Type': 'text/javascript; charset=utf-8',
+  })
+
+  if (request.method === 'HEAD') {
+    response.end()
+  } else {
+    response.end(content)
+  }
+}
+
 async function getStaticFilePath(requestUrl) {
   const url = new URL(requestUrl, `http://127.0.0.1:${port}`)
   const pathname = safeDecodePathname(url.pathname)
@@ -4068,6 +4156,11 @@ async function serveStaticWeb(request, response) {
 
   if (pathname.startsWith('/api/')) {
     return false
+  }
+
+  if (pathname === '/openstrmbridge-runtime-config.js') {
+    await serveRuntimeConfig(request, response)
+    return true
   }
 
   const filePath = await getStaticFilePath(request.url)
@@ -4472,8 +4565,8 @@ const server = createServer(async (request, response) => {
   })
 })
 
-server.listen(port, '127.0.0.1', () => {
-  console.log(`OpenStrmBridge storage check server listening on http://127.0.0.1:${port}`)
+server.listen(port, host, () => {
+  console.log(`OpenStrmBridge storage check server listening on http://${host}:${port}`)
   startTaskScheduler()
 })
 

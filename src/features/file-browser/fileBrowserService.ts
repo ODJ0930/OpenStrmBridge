@@ -1,3 +1,4 @@
+import { getApiBaseUrl } from '../../shared/config/runtimeConfig'
 import type { FileEntry, FileEntryKind, StorageItem } from '../../shared/types/domain'
 
 export interface FileBrowserService {
@@ -25,9 +26,9 @@ interface BackendBrowseResult {
   entries: BackendBrowseEntry[]
 }
 
-const backendBaseUrl = import.meta.env.VITE_OPENSTRMBRIDGE_API_BASE_URL ?? 'http://127.0.0.1:5174'
-const storageUrl = `${backendBaseUrl.replace(/\/+$/, '')}/api/storage`
-const browseUrl = `${backendBaseUrl.replace(/\/+$/, '')}/api/storage/browse`
+const backendBaseUrl = getApiBaseUrl()
+const storageUrl = `${backendBaseUrl}/api/storage`
+const browseUrl = `${backendBaseUrl}/api/storage/browse`
 
 const mockStorages: StorageItem[] = [
   {

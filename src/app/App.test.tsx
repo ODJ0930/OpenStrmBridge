@@ -32,6 +32,7 @@ function renderRoute(path: string, options: { authenticated?: boolean } = {}) {
 
 describe('OpenStrmBridge shell', () => {
   beforeEach(() => {
+    window.__OPENSTRMBRIDGE_RUNTIME_CONFIG__ = {}
     authService.logout()
     window.localStorage.clear()
     window.sessionStorage.clear()
@@ -51,6 +52,34 @@ describe('OpenStrmBridge shell', () => {
 
     await user.type(screen.getByPlaceholderText('请输入账号'), 'admin')
     await user.type(screen.getByPlaceholderText('请输入密码'), 'openstrmbridge')
+    await user.click(screen.getByRole('button', { name: /登录/ }))
+
+    expect(await screen.findByRole('heading', { name: '任务管理' })).toBeInTheDocument()
+  })
+
+  it('uses runtime credentials when the runtime revision changes', async () => {
+    const user = userEvent.setup()
+
+    window.localStorage.setItem(
+      'openstrmbridge.auth.credentials',
+      JSON.stringify({
+        password: 'old-password',
+        username: 'old-user',
+      }),
+    )
+    window.localStorage.setItem('openstrmbridge.auth.credentials-revision', 'old-revision')
+    window.__OPENSTRMBRIDGE_RUNTIME_CONFIG__ = {
+      auth: {
+        password: 'runtime-password',
+        revision: 'runtime-revision',
+        username: 'runtime-user',
+      },
+    }
+
+    renderRoute('/login', { authenticated: false })
+
+    await user.type(screen.getByPlaceholderText('请输入账号'), 'runtime-user')
+    await user.type(screen.getByPlaceholderText('请输入密码'), 'runtime-password')
     await user.click(screen.getByRole('button', { name: /登录/ }))
 
     expect(await screen.findByRole('heading', { name: '任务管理' })).toBeInTheDocument()

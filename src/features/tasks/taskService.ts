@@ -1,3 +1,4 @@
+import { getApiBaseUrl } from '../../shared/config/runtimeConfig'
 import type { TaskItem, TaskLogResult, TaskRunResult } from '../../shared/types/domain'
 
 export interface TaskService {
@@ -20,8 +21,8 @@ export interface TaskRunAllResponse {
   results: Array<TaskRunResponse | { task: TaskItem; error: string }>
 }
 
-const backendBaseUrl = import.meta.env.VITE_OPENSTRMBRIDGE_API_BASE_URL ?? 'http://127.0.0.1:5174'
-const tasksUrl = `${backendBaseUrl.replace(/\/+$/, '')}/api/tasks`
+const backendBaseUrl = getApiBaseUrl()
+const tasksUrl = `${backendBaseUrl}/api/tasks`
 
 async function readJsonResponse<T>(response: Response) {
   const payload = (await response.json()) as T | { message?: string }

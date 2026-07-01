@@ -3,7 +3,7 @@ import type { NavItem, SettingsTabKey } from '../types/ui'
 export const brandConfig = {
   name: 'OpenStrmBridge',
   shortName: 'OSB',
-  version: 'v0.1.0',
+  version: 'v0.1.1',
   repositoryLabel: 'OpenStrmBridge',
 } as const
 

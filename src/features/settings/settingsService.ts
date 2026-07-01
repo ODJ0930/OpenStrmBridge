@@ -1,3 +1,4 @@
+import { getApiBaseUrl } from '../../shared/config/runtimeConfig'
 import type { Proxy302Settings, StrmSettings, WebhookSettings } from '../../shared/types/domain'
 
 export interface AppSettings {
@@ -20,8 +21,8 @@ export interface SettingsService {
   createSignSecret(): string
 }
 
-const backendBaseUrl = import.meta.env.VITE_OPENSTRMBRIDGE_API_BASE_URL ?? 'http://127.0.0.1:5174'
-const settingsUrl = `${backendBaseUrl.replace(/\/+$/, '')}/api/settings`
+const backendBaseUrl = getApiBaseUrl()
+const settingsUrl = `${backendBaseUrl}/api/settings`
 const defaultOutputRoot = '/opt/openstrmbridge/strm'
 
 function getProgramBaseUrl() {
@@ -42,7 +43,7 @@ function createSignSecret() {
 
 function createWebhookUrl(currentUrl?: string) {
   const token = createSignSecret()
-  const fallbackUrl = `${backendBaseUrl.replace(/\/+$/, '')}/webhook/${token}`
+  const fallbackUrl = `${backendBaseUrl}/webhook/${token}`
   const rawUrl = String(currentUrl ?? '').trim()
 
   if (!rawUrl) {

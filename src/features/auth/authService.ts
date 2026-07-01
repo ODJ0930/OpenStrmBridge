@@ -1,3 +1,5 @@
+import { getRuntimeAuthConfig } from '../../shared/config/runtimeConfig'
+
 export interface LoginCredentials {
   username: string
   password: string
@@ -22,6 +24,7 @@ export interface UpdateCredentialsValues {
 const persistentSessionKey = 'openstrmbridge.auth.session'
 const temporarySessionKey = 'openstrmbridge.auth.temporary-session'
 const credentialsKey = 'openstrmbridge.auth.credentials'
+const credentialsRevisionKey = 'openstrmbridge.auth.credentials-revision'
 const defaultUsername = import.meta.env.VITE_OPENSTRMBRIDGE_LOGIN_USER ?? 'admin'
 const defaultPassword = import.meta.env.VITE_OPENSTRMBRIDGE_LOGIN_PASSWORD ?? 'openstrmbridge'
 
@@ -130,9 +133,36 @@ function readStoredCredentials(): AuthCredentials | null {
   }
 }
 
+function syncRuntimeCredentials() {
+  const storage = getStorage('local')
+  const runtimeCredentials = getRuntimeAuthConfig()
+  const runtimeRevision = runtimeCredentials?.revision
+
+  if (!storage || !runtimeCredentials || !runtimeRevision) {
+    return
+  }
+
+  if (storage.getItem(credentialsRevisionKey) === runtimeRevision) {
+    return
+  }
+
+  storage.setItem(
+    credentialsKey,
+    JSON.stringify({
+      password: runtimeCredentials.password,
+      username: runtimeCredentials.username,
+    }),
+  )
+  storage.setItem(credentialsRevisionKey, runtimeRevision)
+  clearSession()
+}
+
 function getCredentials(): AuthCredentials {
+  syncRuntimeCredentials()
+
   return (
-    readStoredCredentials() ?? {
+    readStoredCredentials() ??
+    getRuntimeAuthConfig() ?? {
       password: defaultPassword,
       username: defaultUsername,
     }
@@ -215,13 +245,20 @@ export const authService = {
       throw new Error('请输入新密码')
     }
 
-    getStorage('local')?.setItem(
+    const storage = getStorage('local')
+    const runtimeRevision = getRuntimeAuthConfig()?.revision
+
+    storage?.setItem(
       credentialsKey,
       JSON.stringify({
         password,
         username,
       }),
     )
+
+    if (runtimeRevision) {
+      storage?.setItem(credentialsRevisionKey, runtimeRevision)
+    }
 
     return updateStoredSessionUsername(username)
   },

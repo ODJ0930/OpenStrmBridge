@@ -1,3 +1,4 @@
+import { getApiBaseUrl } from '../../shared/config/runtimeConfig'
 import type {
   StrmAssistantDefaults,
   StrmAssistantStartResult,
@@ -13,8 +14,8 @@ export interface StrmAssistantService {
   start(): Promise<StrmAssistantStartResult>
 }
 
-const backendBaseUrl = import.meta.env.VITE_OPENSTRMBRIDGE_API_BASE_URL ?? 'http://127.0.0.1:5174'
-const strmAssistantUrl = `${backendBaseUrl.replace(/\/+$/, '')}/api/strm-assistant`
+const backendBaseUrl = getApiBaseUrl()
+const strmAssistantUrl = `${backendBaseUrl}/api/strm-assistant`
 let cachedDefaults: StrmAssistantDefaults | null = null
 let pendingDefaults: Promise<StrmAssistantDefaults> | null = null
 
