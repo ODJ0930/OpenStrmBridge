@@ -1,0 +1,152 @@
+emby:
+  host: http://192.168.0.109:8096 # emby 访问地址
+  mount-path: /data # rclone/cd2 挂载的本地磁盘路径, 如果 emby 是容器部署, 这里要配的就是容器内部的挂载路径
+  episodes-unplay-prior: true # 是否修改剧集排序, 让未播的剧集靠前排列; 启用该配置时, 会忽略原接口的分页机制
+  resort-random-items: true # 是否重排序随机列表, 对 emby 的排序结果进行二次重排序, 使得列表足够随机
+  # 代理异常处理策略
+  # origin: 代理回源服务器处理
+  # reject: 拒绝处理
+  proxy-error-strategy: origin
+  # 图片质量, 默认请求原图
+  # 配置范围: [1, 100]
+  # 建议范围: [70, 90]
+  # 具体数值根据自己的实际情况作调整
+  images-quality: 100
+  strm: # 远程视频 strm 配置
+    # 路径映射, 将 strm 文件内的路径片段替换成指定路径片段
+    # 可配置多个映射, 每个映射需要有 2 个片段, 使用 [=>] 符号进行分割, 程序自上而下映射第一个匹配的结果
+    # 这个配置的映射是比较灵活的, 不一定必须按照前缀映射, 可以直接将地址中间的片段给替换掉
+    #
+    # 举个栗子
+    # strm 文件内容: https://test-res.com:8094/1.mp4, 替换结果: http://localhost:8095/1.mp4
+    # strm 文件内容: https://test-res.com:12138/test-id-12138.mp4, 替换结果: https://test-res.com:10086/test-id-12138.mp4
+    path-map:
+      - https://test-res.com:8094 => http://localhost:8095
+      - 12138 => 10086
+    # 是否启用 strm 内部重定向
+    #
+    # 启用, 程序会在内部访问 strm 远程地址并重定向到最终地址后, 再重定向给客户端
+    # 禁用, 程序会将 strm 的原始地址直接重定向给客户端
+    internal-redirect-enable: false
+  # emby 下载接口处理策略
+  #    403: 禁用下载接口, 返回 403 响应
+  # origin: 代理到源服务器
+  # direct: 获取并重定向到直链地址
+  download-strategy: 403
+  # emby 本地媒体根目录
+  # 检测到该路径为前缀的媒体时, 代理回源处理
+  local-media-roots:
+    - /data/local
+    - /data/other
+  # 自定义 css js 配置
+  custom-css-js:
+    # 调试模式开关
+    # 开启时, 每次访问 emby 首页都会重新加载一次本地脚本文件
+    debug-mode: false
+
+# openlist 访问配置
+openlist:
+  host: http://192.168.0.109:5244 # openlist 访问地址
+  token: openlist-xxxxx # openlist api key 可以在 openlist 管理后台查看
+  # 将 openlist 目录树映射生成到磁盘, 并对特殊容器进行特定的转换
+  # 具体使用方式可参考仓库 Readme 文档
+  local-tree-gen:
+    enable: false # 功能是否开启
+    # 是否开启 ffmpeg 辅助
+    #
+    # 主要目的是在生成虚拟容器时, 解析视频的元数据, 供 emby 读取
+    # 可能会有风控风险, 请根据实际情况自行决定是否开启
+    ffmpeg-enable: false
+    # 虚拟媒体容器, 生成的是与媒体同名的空文件
+    # 必须使用本项目反代 openlist 才可以正常播放
+    #
+    # 若媒体元数据可通过 TMDB 刮削, 则配置于此, 不区分大小写
+    #
+    # 默认写入视频时长 3 小时, 若开启 ffmpeg 辅助, 则会尝试解析视频真实时长, !!有风控风险谨慎开启!!
+    virtual-containers: mp4,mkv
+    # strm 媒体容器, 生成的是与媒体名称相同的 strm 文件
+    # 通过 emby 源端口也可能正常播放
+    strm-containers: ts
+    # 音乐媒体容器, 生成的是与媒体同名的空文件
+    # 必须使用本项目反代 openlist 才可以正常播放
+    # 必须开启 ffmpeg 辅助才能解析音频时长以及音乐标签数据到空文件中, !!有风控风险谨慎开启!!
+    #
+    # 未开启 ffmpeg 辅助时, 由 strm 容器代替
+    music-containers: mp3,flac
+    # 程序自动删除文件的最大数量
+    #
+    # 当检测到 openlist 目录树与本地比较缺失文件数量大于这个值时
+    # 程序会认为 openlist 出现挂载异常, 不对本地目录树进行删除操作
+    # 建议配置为 openlist 数据量的 3/4 左右
+    auto-remove-max-count: 6000
+    refresh-interval: 10 # 与远程同步刷新的间隔, 单位: 分钟
+    scan-prefixes: # 指定要扫描的目录树前缀, 不指定则全量扫描
+      - /电影/G
+      - /电视剧
+    # 允许处理的容器, 为空则允许所有容器
+    # 只有指定的容器会被处理, 其他容器会被忽略, 避免触发源文件下载到本地
+    allow-containers: ass,srt,sub
+    # 同步线程数
+    threads: 8
+
+# 该配置项目前只对阿里云盘生效, 如果你使用的是其他网盘, 请直接将 enable 设置为 false
+video-preview:
+  enable: true # 是否开启 openlist 转码资源信息获取
+  containers: # 对哪些视频容器获取转码资源信息
+    - mp4
+    - mkv
+  ignore-template-ids: # 忽略哪些转码清晰度
+    - LD
+    - SD
+
+path:
+  # emby 挂载路径和 openlist 真实路径之间的前缀映射
+  # 冒号左边表示本地挂载路径, 冒号右边表示 openlist 的真实路径
+  # 这个配置请再三确认配置正确, 可以减少很多不必要的网络请求
+  emby2openlist:
+    - /movie:/电影
+    - /music:/音乐
+    - /show:/综艺
+    - /series:/电视剧
+    - /sport:/运动
+    - /animation:/动漫
+
+cache:
+  # 是否启用缓存中间件
+  # 推荐启用, 既可以缓存 Emby 的大接口以及静态资源, 又可以缓存网盘直链, 避免频繁请求
+  enable: true
+  # 缓存过期时间
+  #
+  # 可配置单位: d(天), h(小时), m(分钟), s(秒)
+  #
+  # 该配置不会影响特殊接口的缓存时间
+  # 比如直链获取接口的缓存时间固定为 10m, 字幕获取接口的缓存时间固定为 30d
+  expired: 1d
+
+ssl:
+  enable: false # 是否启用 https
+  # 是否使用单一端口
+  #
+  # 启用: 程序会在 8094 端口上监听 https 连接, 不监听 http
+  # 不启用: 程序会在 8094 端口上监听 https 连接, 在 8095 端口上监听 http 连接
+  single-port: false
+  key: testssl.cn.key # 私钥文件名
+  crt: testssl.cn.crt # 证书文件名
+
+log:
+  # 是否禁用控制台彩色日志
+  #
+  # 程序默认是输出彩色日志的,
+  # 如果你的终端不支持彩色输出, 并且多出来一些乱码字符
+  # 可以将该项设置为 true
+  disable-color: false
+
+ge2o:
+  # api 本地密钥, 必须配置后才能启用接口调用
+  api-secret: my-secret
+  # web 平台相关配置
+  web:
+    # 是否禁用 web 平台
+    disable: false
+    # 是否禁用 emby 快速进入 web 平台的辅助按钮
+    disable-emby-btn: false
