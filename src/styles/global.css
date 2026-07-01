@@ -1037,6 +1037,11 @@ a {
   font-size: 12px;
 }
 
+.strm-assistant-actions {
+  display: flex;
+  grid-column: 1 / -1;
+}
+
 .strm-assistant-tag-button {
   display: inline-flex;
   padding: 0;

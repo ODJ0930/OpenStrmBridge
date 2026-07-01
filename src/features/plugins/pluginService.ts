@@ -8,7 +8,7 @@ import type {
 
 export interface StrmAssistantService {
   getCachedDefaults(): StrmAssistantDefaults | null
-  getDefaults(): Promise<StrmAssistantDefaults>
+  getDefaults(options?: { force?: boolean }): Promise<StrmAssistantDefaults>
   setPluginDirectory(pluginDirectory: string): Promise<StrmAssistantDefaults>
   setTaskSchedule(schedule: StrmAssistantTaskSchedule): Promise<StrmAssistantDefaults>
   start(): Promise<StrmAssistantStartResult>
@@ -53,12 +53,12 @@ export const strmAssistantService: StrmAssistantService = {
   getCachedDefaults() {
     return cachedDefaults
   },
-  async getDefaults() {
-    if (cachedDefaults) {
+  async getDefaults(options = {}) {
+    if (!options.force && cachedDefaults) {
       return cachedDefaults
     }
 
-    if (pendingDefaults) {
+    if (!options.force && pendingDefaults) {
       return pendingDefaults
     }
 

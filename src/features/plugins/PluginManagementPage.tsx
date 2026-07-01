@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { App as AntApp, Checkbox, Input, InputNumber, Modal, Switch, Tag } from 'antd'
+import { App as AntApp, Button, Checkbox, Input, InputNumber, Modal, Switch, Tag } from 'antd'
 
 import type {
   StrmAssistantStartResult,
@@ -293,19 +293,13 @@ export function PluginManagementPage() {
     status?.capabilities?.controlItems.filter((item) => item.detected).length ?? 0
 
   useEffect(() => {
-    const cachedDefaults = strmAssistantService.getCachedDefaults()
-
-    if (cachedDefaults) {
-      return undefined
-    }
-
     let mounted = true
 
     async function loadStatus() {
       setLoadingStatus(true)
 
       try {
-        const defaults = await strmAssistantService.getDefaults()
+        const defaults = await strmAssistantService.getDefaults({ force: true })
 
         if (mounted) {
           setStatus(defaults.status)
@@ -327,6 +321,22 @@ export function PluginManagementPage() {
       mounted = false
     }
   }, [message])
+
+  async function handleReloadStatus() {
+    setLoadingStatus(true)
+    setStartResult(null)
+
+    try {
+      const defaults = await strmAssistantService.getDefaults({ force: true })
+
+      setStatus(defaults.status)
+      message.success('插件目录已重新探测')
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '重新探测插件目录失败')
+    } finally {
+      setLoadingStatus(false)
+    }
+  }
 
   async function handleStart() {
     setStarting(true)
@@ -515,6 +525,11 @@ export function PluginManagementPage() {
               <Tag color={directoryTagColor}>{directoryTagText}</Tag>
             </button>
           </div>
+          <div className="strm-assistant-actions">
+            <Button loading={loadingStatus} onClick={() => void handleReloadStatus()} size="small">
+              重新探测
+            </Button>
+          </div>
           <button
             className="strm-assistant-paths"
             disabled={loadingStatus}
@@ -534,7 +549,9 @@ export function PluginManagementPage() {
 
         {startResult ? (
           <p className="strm-assistant-result">
-            已复制到 {startResult.pluginDirectory}，Emby 已重启。
+            {startResult.restarted
+              ? `已复制到 ${startResult.pluginDirectory}，Emby 容器 ${startResult.embyContainerName} 已重启。`
+              : `已复制到 ${startResult.pluginDirectory}，请手动重启 Emby 后生效。`}
           </p>
         ) : null}
       </section>

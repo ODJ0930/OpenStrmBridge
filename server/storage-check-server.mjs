@@ -57,6 +57,7 @@ const strmAssistantContainerPluginDirectory = '/config/plugins'
 const configuredEmbyPluginDirectory = process.env.OPENSTRMBRIDGE_EMBY_PLUGIN_DIR?.trim()
 const defaultEmbyContainerName =
   process.env.OPENSTRMBRIDGE_EMBY_CONTAINER_NAME?.trim() || 'openstrmbridge-emby'
+const commonEmbyContainerNames = ['emby', 'embyserver', 'emby-server']
 
 const strmAssistantFeatureLabels = {
   ChapterApi: '章节标记',
@@ -1749,40 +1750,107 @@ async function getStrmAssistantCapabilities(sourceFile, editable) {
   }
 }
 
-async function detectDockerEmbyPluginDirectory() {
+function getUniqueDockerContainerNames(names) {
+  return Array.from(new Set(names.map((name) => String(name ?? '').trim()).filter(Boolean)))
+}
+
+async function listDockerContainerNames() {
   try {
-    const { stdout } = await runProcess('docker', ['inspect', defaultEmbyContainerName])
+    const { stdout } = await runProcess('docker', ['ps', '-a', '--format', '{{.Names}}'])
+
+    return stdout
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+  } catch {
+    return []
+  }
+}
+
+async function getEmbyContainerCandidates() {
+  return getUniqueDockerContainerNames([
+    defaultEmbyContainerName,
+    ...commonEmbyContainerNames,
+    ...(await listDockerContainerNames()),
+  ])
+}
+
+async function inspectDockerContainer(containerName) {
+  try {
+    const { stdout } = await runProcess('docker', ['inspect', containerName])
     const containers = JSON.parse(stdout)
-    const mounts = Array.isArray(containers?.[0]?.Mounts) ? containers[0].Mounts : []
+
+    return containers?.[0] ?? null
+  } catch {
+    return null
+  }
+}
+
+function getDockerPluginDirectoryFromMount(containerName, mount) {
+  const destination = String(mount.Destination ?? '').replace(/\/+$/, '')
+  const source = String(mount.Source ?? '')
+
+  if (!source) {
+    return null
+  }
+
+  if (destination === '/config/plugins') {
+    return {
+      containerPluginDirectory: strmAssistantContainerPluginDirectory,
+      embyContainerName: containerName,
+      found: true,
+      pluginDirectory: source,
+      source: 'docker:/config/plugins',
+    }
+  }
+
+  if (destination === '/config') {
+    return {
+      containerPluginDirectory: strmAssistantContainerPluginDirectory,
+      embyContainerName: containerName,
+      found: true,
+      pluginDirectory: path.join(source, 'plugins'),
+      source: 'docker:/config',
+    }
+  }
+
+  return null
+}
+
+async function getDockerEmbyPluginDirectories() {
+  const directories = []
+
+  for (const containerName of await getEmbyContainerCandidates()) {
+    const container = await inspectDockerContainer(containerName)
+    const mounts = Array.isArray(container?.Mounts) ? container.Mounts : []
 
     for (const mount of mounts) {
-      const destination = String(mount.Destination ?? '').replace(/\/+$/, '')
-      const source = String(mount.Source ?? '')
+      const directory = getDockerPluginDirectoryFromMount(containerName, mount)
 
-      if (!source) {
+      if (!directory) {
         continue
       }
 
-      if (destination === '/config/plugins') {
-        return {
-          containerPluginDirectory: strmAssistantContainerPluginDirectory,
-          found: true,
-          pluginDirectory: source,
-          source: 'docker:/config/plugins',
-        }
-      }
-
-      if (destination === '/config') {
-        return {
-          containerPluginDirectory: strmAssistantContainerPluginDirectory,
-          found: true,
-          pluginDirectory: path.join(source, 'plugins'),
-          source: 'docker:/config',
-        }
-      }
+      directories.push(directory)
     }
-  } catch {
-    return null
+  }
+
+  return directories
+}
+
+async function detectDockerEmbyPluginDirectory() {
+  const directories = await getDockerEmbyPluginDirectories()
+
+  return directories[0] ?? null
+}
+
+async function detectDockerContainerForPluginDirectory(pluginDirectory) {
+  const resolvedPluginDirectory = path.resolve(pluginDirectory)
+
+  for (const directory of await getDockerEmbyPluginDirectories()) {
+    if (path.resolve(directory.pluginDirectory) === resolvedPluginDirectory) {
+      return directory
+    }
   }
 
   return null
@@ -1793,8 +1861,11 @@ async function detectEmbyPluginDirectory(baseUrl = '') {
   const manualPluginDirectory = String(settings.strmAssistant?.pluginDirectory ?? '').trim()
 
   if (manualPluginDirectory) {
+    const dockerDirectory = await detectDockerContainerForPluginDirectory(manualPluginDirectory)
+
     return {
-      containerPluginDirectory: '',
+      containerPluginDirectory: dockerDirectory?.containerPluginDirectory ?? '',
+      embyContainerName: dockerDirectory?.embyContainerName ?? '',
       found: true,
       pluginDirectory: manualPluginDirectory,
       source: 'manual',
@@ -1802,8 +1873,13 @@ async function detectEmbyPluginDirectory(baseUrl = '') {
   }
 
   if (configuredEmbyPluginDirectory) {
+    const dockerDirectory = await detectDockerContainerForPluginDirectory(
+      configuredEmbyPluginDirectory,
+    )
+
     return {
-      containerPluginDirectory: '',
+      containerPluginDirectory: dockerDirectory?.containerPluginDirectory ?? '',
+      embyContainerName: dockerDirectory?.embyContainerName ?? '',
       found: true,
       pluginDirectory: configuredEmbyPluginDirectory,
       source: 'env',
@@ -1828,6 +1904,7 @@ async function detectEmbyPluginDirectory(baseUrl = '') {
     if (await isLikelyEmbyPluginDirectory(candidate)) {
       return {
         containerPluginDirectory: '',
+        embyContainerName: '',
         found: true,
         pluginDirectory: candidate,
         source: 'known-path',
@@ -1839,6 +1916,7 @@ async function detectEmbyPluginDirectory(baseUrl = '') {
     if (await isDirectory(candidate)) {
       return {
         containerPluginDirectory: '',
+        embyContainerName: '',
         found: true,
         pluginDirectory: candidate,
         source: 'existing-directory',
@@ -1848,6 +1926,7 @@ async function detectEmbyPluginDirectory(baseUrl = '') {
 
   return {
     containerPluginDirectory: '',
+    embyContainerName: '',
     found: false,
     pluginDirectory: process.platform === 'win32' ? candidates[0] : '/root/emby/config/plugins',
     source: 'fallback',
@@ -1859,7 +1938,7 @@ async function getEmbyPluginDefaults(baseUrl = '') {
 
   return {
     containerPluginDirectory: detection.containerPluginDirectory,
-    embyContainerName: defaultEmbyContainerName,
+    embyContainerName: detection.embyContainerName ?? '',
     pluginDirectory: detection.pluginDirectory,
     sourceFile: bundledStrmAssistantPluginFile,
   }
@@ -1879,7 +1958,7 @@ async function getEmbyPluginStatus(baseUrl = '') {
     capabilities,
     containerPluginDirectory: detection.containerPluginDirectory,
     detectionSource: detection.source,
-    embyContainerName: defaultEmbyContainerName,
+    embyContainerName: detection.embyContainerName ?? '',
     foundPluginDirectory: detection.found,
     installed,
     pluginDirectory,
@@ -1936,7 +2015,7 @@ async function installEmbyPlugin(baseUrl = '') {
     capabilities,
     containerPluginDirectory: detection.containerPluginDirectory,
     detectionSource: detection.source,
-    embyContainerName: defaultEmbyContainerName,
+    embyContainerName: detection.embyContainerName ?? '',
     foundPluginDirectory: true,
     installed: true,
     message: '神医助手插件已安装到 Emby 插件目录。',
@@ -1950,11 +2029,13 @@ async function installEmbyPlugin(baseUrl = '') {
   }
 }
 
-async function restartEmbyServer() {
-  const embyContainerName = defaultEmbyContainerName
-
+async function restartEmbyServer(embyContainerName) {
   if (!embyContainerName) {
-    throw new Error('缺少 Emby Docker 容器名')
+    return {
+      embyContainerName: '',
+      restartOutput: '',
+      restarted: false,
+    }
   }
 
   const result = await runProcess('docker', ['restart', embyContainerName])
@@ -1970,12 +2051,14 @@ async function startStrmAssistant(baseUrl = '') {
   const installedPlugin = await installEmbyPlugin(baseUrl)
 
   try {
-    const restartResult = await restartEmbyServer()
+    const restartResult = await restartEmbyServer(installedPlugin.embyContainerName)
 
     return {
       ...installedPlugin,
       ...restartResult,
-      message: '神医助手已启动：插件已安装并已重启 Emby。',
+      message: restartResult.restarted
+        ? `神医助手已启动：插件已安装并已重启 Emby 容器 ${restartResult.embyContainerName}。`
+        : '神医助手插件已安装，请手动重启 Emby 后生效。',
     }
   } catch (error) {
     throw new Error(`插件已复制到 Emby 插件目录，但重启 Emby 失败：${getErrorMessage(error)}`)
