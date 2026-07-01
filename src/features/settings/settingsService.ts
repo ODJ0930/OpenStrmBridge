@@ -107,6 +107,7 @@ function getDefaultStrmSettings(): StrmSettings {
 
 function getDefaultProxy302Settings(): Proxy302Settings {
   return {
+    embyApiKey: '',
     engine: 'go-emby2openlist',
     enabled: true,
     healthy: true,

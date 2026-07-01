@@ -1,9 +1,22 @@
 import { useEffect, useState } from 'react'
-import { App as AntApp, Checkbox, Input, InputNumber, Modal, Switch, Tag } from 'antd'
+import type { KeyboardEvent, MouseEvent } from 'react'
+import {
+  App as AntApp,
+  Button,
+  Checkbox,
+  Input,
+  InputNumber,
+  Modal,
+  Progress,
+  Switch,
+  Tag,
+  Tooltip,
+} from 'antd'
 
 import type {
   StrmAssistantStartResult,
   StrmAssistantStatus,
+  StrmAssistantTaskSchedule,
   StrmAssistantTaskScheduleMode,
 } from '../../shared/types/domain'
 import { AppIcon } from '../../shared/ui/AppIcon'
@@ -252,6 +265,35 @@ function getScheduleDescription(
   return descriptions.join('，') || '未设置'
 }
 
+function isTaskRunActive(schedule: StrmAssistantTaskSchedule | undefined) {
+  return schedule?.runStatus === 'queued' || schedule?.runStatus === 'running'
+}
+
+function getTaskRunProgress(schedule: StrmAssistantTaskSchedule | undefined) {
+  if (schedule?.runStatus === 'succeeded') {
+    return 100
+  }
+
+  const progress = Number(schedule?.runProgress ?? 0)
+
+  return Number.isFinite(progress) ? Math.max(0, Math.min(100, Math.round(progress))) : 0
+}
+
+function getTaskRunStatusText(schedule: StrmAssistantTaskSchedule | undefined) {
+  switch (schedule?.runStatus) {
+    case 'queued':
+      return schedule.runMessage || '已提交执行'
+    case 'running':
+      return `${schedule.runMessage || '正在执行'}：${getTaskRunProgress(schedule)}%`
+    case 'succeeded':
+      return '执行完成'
+    case 'failed':
+      return schedule.lastError || schedule.runMessage || '执行失败'
+    default:
+      return '未执行'
+  }
+}
+
 export function PluginManagementPage() {
   const { message } = AntApp.useApp()
   const cachedDefaults = strmAssistantService.getCachedDefaults()
@@ -271,6 +313,7 @@ export function PluginManagementPage() {
   const [status, setStatus] = useState<StrmAssistantStatus | null>(
     () => cachedDefaults?.status ?? null,
   )
+  const [submittingTaskId, setSubmittingTaskId] = useState<string | null>(null)
   const containerPluginDirectory = status?.containerPluginDirectory?.trim()
   const isManualDirectory = status?.detectionSource === 'manual'
   const installed = Boolean(status?.installed)
@@ -293,6 +336,10 @@ export function PluginManagementPage() {
     status?.capabilities?.features.filter((item) => item.detected).length ?? 0
   const detectedControlCount =
     status?.capabilities?.controlItems.filter((item) => item.detected).length ?? 0
+  const activeTaskRunKey = strmAssistantTaskItems
+    .filter((task) => isTaskRunActive(status?.taskSchedules?.[task.id]))
+    .map((task) => task.id)
+    .join(',')
 
   useEffect(() => {
     const cachedDefaults = strmAssistantService.getCachedDefaults()
@@ -329,6 +376,42 @@ export function PluginManagementPage() {
       mounted = false
     }
   }, [message])
+
+  useEffect(() => {
+    const taskIds = activeTaskRunKey.split(',').filter(Boolean)
+
+    if (taskIds.length === 0) {
+      return undefined
+    }
+
+    let mounted = true
+
+    async function pollTaskRuns() {
+      for (const taskId of taskIds) {
+        try {
+          const result = await strmAssistantService.getTaskRun(taskId)
+
+          if (!mounted) {
+            return
+          }
+
+          setStatus(result.status)
+        } catch (error) {
+          console.warn(error instanceof Error ? error.message : '读取神医助手计划任务进度失败')
+        }
+      }
+    }
+
+    void pollTaskRuns()
+    const timer = window.setInterval(() => {
+      void pollTaskRuns()
+    }, 2500)
+
+    return () => {
+      mounted = false
+      window.clearInterval(timer)
+    }
+  }, [activeTaskRunKey])
 
   async function handleStart() {
     setStarting(true)
@@ -438,6 +521,37 @@ export function PluginManagementPage() {
     } finally {
       setSavingSchedule(false)
     }
+  }
+
+  async function handleRunTaskOnce(task: StrmAssistantTaskOption, event: MouseEvent<HTMLElement>) {
+    event.stopPropagation()
+
+    if (!installed) {
+      message.warning('请先启动神医助手')
+      return
+    }
+
+    setSubmittingTaskId(task.id)
+
+    try {
+      const result = await strmAssistantService.runTaskOnce(task.id)
+
+      setStatus(result.status)
+      message.success(`${task.title} 已提交执行`)
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '执行神医助手计划任务失败')
+    } finally {
+      setSubmittingTaskId(null)
+    }
+  }
+
+  function handleTaskCardKeyDown(event: KeyboardEvent<HTMLElement>, task: StrmAssistantTaskOption) {
+    if (!installed || !['Enter', ' '].includes(event.key)) {
+      return
+    }
+
+    event.preventDefault()
+    openScheduleModal(task)
   }
 
   return (
@@ -581,21 +695,59 @@ export function PluginManagementPage() {
         <div className="strm-assistant-task-group">
           <h3>计划任务</h3>
           <div className="strm-assistant-task-list">
-            {strmAssistantTaskItems.map((task) => (
-              <button
-                className="strm-assistant-task-item"
-                disabled={!installed}
-                key={task.id}
-                onClick={() => openScheduleModal(task)}
-                type="button"
-              >
-                <strong>{task.title}</strong>
-                <p>{task.description}</p>
-                <span className="strm-assistant-task-schedule">
-                  执行逻辑：{getScheduleDescription(status?.taskSchedules?.[task.id])}
-                </span>
-              </button>
-            ))}
+            {strmAssistantTaskItems.map((task) => {
+              const schedule = status?.taskSchedules?.[task.id]
+              const taskRunActive = isTaskRunActive(schedule)
+              const progressStatus =
+                schedule?.runStatus === 'failed'
+                  ? 'exception'
+                  : schedule?.runStatus === 'succeeded'
+                    ? 'success'
+                    : taskRunActive
+                      ? 'active'
+                      : 'normal'
+
+              return (
+                <article
+                  className={`strm-assistant-task-item${installed ? '' : ' is-disabled'}`}
+                  key={task.id}
+                  onClick={installed ? () => openScheduleModal(task) : undefined}
+                  onKeyDown={(event) => handleTaskCardKeyDown(event, task)}
+                  role={installed ? 'button' : undefined}
+                  tabIndex={installed ? 0 : -1}
+                >
+                  <div className="strm-assistant-task-heading">
+                    <strong>{task.title}</strong>
+                    <Tooltip title="立即执行一次">
+                      <Button
+                        aria-label={`立即执行 ${task.title}`}
+                        className="strm-assistant-task-run"
+                        disabled={!installed || taskRunActive}
+                        icon={<AppIcon name="play" size={14} />}
+                        loading={submittingTaskId === task.id}
+                        onClick={(event) => void handleRunTaskOnce(task, event)}
+                        shape="circle"
+                        size="small"
+                        type="text"
+                      />
+                    </Tooltip>
+                  </div>
+                  <p>{task.description}</p>
+                  <span className="strm-assistant-task-schedule">
+                    执行逻辑：{getScheduleDescription(schedule)}
+                  </span>
+                  <div className="strm-assistant-task-progress">
+                    <span>执行进度：{getTaskRunStatusText(schedule)}</span>
+                    <Progress
+                      percent={getTaskRunProgress(schedule)}
+                      showInfo={false}
+                      size="small"
+                      status={progressStatus}
+                    />
+                  </div>
+                </article>
+              )
+            })}
           </div>
         </div>
       </section>

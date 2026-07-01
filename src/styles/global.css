@@ -1178,14 +1178,15 @@ a {
 }
 
 .strm-assistant-option-row:hover,
-.strm-assistant-task-item:hover:not(:disabled) {
+.strm-assistant-task-item:hover:not(.is-disabled) {
   border-color: #cfe3ff;
   box-shadow: 0 10px 22px rgba(28, 40, 58, 0.08);
   transform: translateY(-1px);
 }
 
 .strm-assistant-options.is-disabled .strm-assistant-option-row,
-.strm-assistant-options.is-disabled .strm-assistant-task-item {
+.strm-assistant-options.is-disabled .strm-assistant-task-item,
+.strm-assistant-task-item.is-disabled {
   background: #f4f6f8;
 }
 
@@ -1231,7 +1232,7 @@ a {
 
 .strm-assistant-task-item {
   display: grid;
-  gap: 4px;
+  gap: 6px;
   min-width: 0;
   padding: 10px 12px;
   border: 1px solid var(--border);
@@ -1245,14 +1246,50 @@ a {
     box-shadow var(--motion);
 }
 
-.strm-assistant-task-item:disabled {
+.strm-assistant-task-item.is-disabled {
   cursor: default;
+}
+
+.strm-assistant-task-heading {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.strm-assistant-task-heading strong {
+  min-width: 0;
+}
+
+.strm-assistant-task-run {
+  flex: 0 0 auto;
+  color: #1677ff;
 }
 
 .strm-assistant-task-schedule {
   margin-top: 2px;
   color: #6b7785;
   font-size: 12px;
+}
+
+.strm-assistant-task-progress {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  margin-top: 2px;
+}
+
+.strm-assistant-task-progress span {
+  overflow: hidden;
+  color: #6b7785;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.strm-assistant-task-progress .ant-progress {
+  margin-bottom: 0;
 }
 
 .strm-assistant-schedule-form {

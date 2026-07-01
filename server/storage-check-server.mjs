@@ -102,6 +102,36 @@ const strmAssistantTaskLabels = {
   UpdatePluginTask: '更新插件',
 }
 
+const strmAssistantTaskClassById = {
+  'check-missing-media-info': 'CheckMissingMediaInfoTask',
+  'clear-chapter-markers': 'ClearChapterMarkersTask',
+  'extract-intro-fingerprint': 'ExtractIntroFingerprintTask',
+  'extract-media-info': 'ExtractMediaInfoTask',
+  'extract-strm-primary-image': 'ExtractStrmPrimaryImageTask',
+  'extract-video-thumbnail': 'ExtractVideoThumbnailTask',
+  'merge-version': 'MergeMultiVersionTask',
+  'persist-media-info': 'PersistMediaInfoTask',
+  'refresh-episode': 'RefreshEpisodeTask',
+  'refresh-person': 'RefreshPersonTask',
+  'scan-subtitle': 'ScanExternalSubtitleTask',
+  'update-plugin': 'UpdatePluginTask',
+}
+
+const strmAssistantTaskTitlesById = {
+  'check-missing-media-info': '检查补漏缺失媒体信息',
+  'clear-chapter-markers': '清除片头片尾标记',
+  'extract-intro-fingerprint': '提取片头声纹',
+  'extract-media-info': '提取媒体信息',
+  'extract-strm-primary-image': '获取strm视频封面',
+  'extract-video-thumbnail': '提取视频缩略图',
+  'merge-version': '合并多版本',
+  'persist-media-info': '持久化媒体信息',
+  'refresh-episode': '刷新剧集元数据',
+  'refresh-person': '刷新演员信息',
+  'scan-subtitle': '扫描外挂字幕',
+  'update-plugin': '更新本插件',
+}
+
 const strmAssistantApiLabels = {
   GetShortcutMenu: '快捷菜单接口',
   GetStrmAssistantJs: '前端脚本接口',
@@ -275,6 +305,7 @@ function normalizeProxy302Settings(proxySettings = {}) {
   return {
     apiSecret: String(proxySettings.apiSecret || createSecret(18)),
     configPath: String(proxySettings.configPath || ge2oConfigFile),
+    embyApiKey: String(proxySettings.embyApiKey || proxySettings.mediaServerToken || ''),
     enabled: proxySettings.enabled !== false,
     engine: 'go-emby2openlist',
     healthy: proxySettings.healthy !== false,
@@ -295,6 +326,7 @@ function createDefaultSettings(baseUrl = '') {
     proxy302: {
       apiSecret: createSecret(18),
       configPath: ge2oConfigFile,
+      embyApiKey: '',
       enabled: true,
       engine: 'go-emby2openlist',
       healthy: true,
@@ -2119,15 +2151,363 @@ function normalizeStrmAssistantTaskSchedule(values = {}) {
 async function updateStrmAssistantTaskSchedule(values, baseUrl = '') {
   const currentSettings = await readSettings(baseUrl)
   const nextSchedule = normalizeStrmAssistantTaskSchedule(values)
+  const previousSchedule = currentSettings.strmAssistant?.taskSchedules?.[nextSchedule.taskId] ?? {}
   const taskSchedules = {
     ...(currentSettings.strmAssistant?.taskSchedules ?? {}),
-    [nextSchedule.taskId]: nextSchedule,
+    [nextSchedule.taskId]: {
+      ...previousSchedule,
+      ...nextSchedule,
+      embyTaskId: previousSchedule.embyTaskId,
+      embyTaskName: previousSchedule.embyTaskName,
+      embyTaskState: previousSchedule.embyTaskState,
+      lastError: previousSchedule.lastError,
+      lastFinishedAt: previousSchedule.lastFinishedAt,
+      lastTriggeredAt: nextSchedule.lastTriggeredAt || previousSchedule.lastTriggeredAt || '',
+      runMessage: previousSchedule.runMessage,
+      runProgress: previousSchedule.runProgress,
+      runStatus: previousSchedule.runStatus,
+      runUpdatedAt: previousSchedule.runUpdatedAt,
+    },
   }
 
   await updateSettingsSection('strmAssistant', { taskSchedules }, baseUrl)
 
   return {
     ...(await getEmbyPluginDefaults(baseUrl)),
+    status: await getEmbyPluginStatus(baseUrl),
+  }
+}
+
+function getStrmAssistantTaskDefinition(taskId) {
+  const normalizedTaskId = String(taskId ?? '').trim()
+  const className = strmAssistantTaskClassById[normalizedTaskId]
+
+  if (!className) {
+    throw new Error('不支持的神医助手计划任务')
+  }
+
+  return {
+    className,
+    labels: [
+      strmAssistantTaskTitlesById[normalizedTaskId],
+      strmAssistantTaskLabels[className],
+      splitPascalCase(className),
+    ].filter(Boolean),
+    taskId: normalizedTaskId,
+    taskName:
+      strmAssistantTaskTitlesById[normalizedTaskId] ||
+      strmAssistantTaskLabels[className] ||
+      splitPascalCase(className),
+  }
+}
+
+function getEmbyScheduledTaskId(task) {
+  return String(task?.Id ?? task?.id ?? task?.TaskId ?? task?.taskId ?? '').trim()
+}
+
+function getEmbyApiConfig(settings) {
+  const mediaServerUrl = normalizeEndpoint(settings.proxy302?.mediaServerUrl)
+  const embyApiKey = String(settings.proxy302?.embyApiKey || '').trim()
+
+  if (!mediaServerUrl) {
+    throw new Error('请先在系统设置的 302代理 中填写 Emby 服务地址')
+  }
+
+  if (!embyApiKey) {
+    throw new Error('请先在系统设置的 302代理 中填写 Emby API Key')
+  }
+
+  return {
+    embyApiKey,
+    mediaServerUrl,
+  }
+}
+
+async function requestEmbyApi(settings, apiPath, init = {}) {
+  const { embyApiKey, mediaServerUrl } = getEmbyApiConfig(settings)
+  const targetUrl = new URL(apiPath, `${mediaServerUrl}/`)
+  const headers = {
+    Accept: 'application/json',
+    'X-Emby-Token': embyApiKey,
+    ...(init.headers ?? {}),
+  }
+
+  if (!targetUrl.searchParams.has('api_key')) {
+    targetUrl.searchParams.set('api_key', embyApiKey)
+  }
+
+  const upstream = await fetch(targetUrl, {
+    ...init,
+    headers,
+  })
+  const text = await upstream.text()
+
+  if (!upstream.ok) {
+    throw new Error(
+      [`Emby API 请求失败 (${upstream.status})`, text.trim().slice(0, 220)]
+        .filter(Boolean)
+        .join('：'),
+    )
+  }
+
+  if (!text.trim()) {
+    return null
+  }
+
+  try {
+    return JSON.parse(text)
+  } catch {
+    return text
+  }
+}
+
+async function fetchEmbyScheduledTasks(settings) {
+  const payload = await requestEmbyApi(settings, '/ScheduledTasks')
+
+  if (Array.isArray(payload)) {
+    return payload
+  }
+
+  if (Array.isArray(payload?.Items)) {
+    return payload.Items
+  }
+
+  return []
+}
+
+function normalizeTaskSearchText(value) {
+  return String(value ?? '')
+    .toLowerCase()
+    .replace(/[\s_\-:：/\\()[\]{}"'.,，。]+/g, '')
+}
+
+function getEmbyTaskSearchText(task) {
+  const directText = [
+    task?.Id,
+    task?.Key,
+    task?.Name,
+    task?.Description,
+    task?.Category,
+    task?.Type,
+    task?.ClassName,
+    task?.TaskType,
+  ]
+    .filter(Boolean)
+    .join(' ')
+
+  return normalizeTaskSearchText(`${directText} ${JSON.stringify(task ?? {})}`)
+}
+
+function findStrmAssistantScheduledTask(tasks, definition, preferredTaskId = '') {
+  const preferredId = String(preferredTaskId ?? '').trim()
+
+  if (preferredId) {
+    const preferredTask = tasks.find((task) => getEmbyScheduledTaskId(task) === preferredId)
+
+    if (preferredTask) {
+      return preferredTask
+    }
+  }
+
+  const className = normalizeTaskSearchText(definition.className)
+  const labelCandidates = definition.labels.map(normalizeTaskSearchText).filter(Boolean)
+
+  return (
+    tasks.find((task) => getEmbyTaskSearchText(task).includes(className)) ??
+    tasks.find((task) => {
+      const taskName = normalizeTaskSearchText(task?.Name ?? task?.Description ?? '')
+
+      return labelCandidates.some(
+        (label) => taskName.includes(label) || (label.includes(taskName) && taskName.length >= 4),
+      )
+    }) ??
+    null
+  )
+}
+
+function toFiniteNumber(value, fallback = 0) {
+  const number = Number(value)
+
+  return Number.isFinite(number) ? number : fallback
+}
+
+function clampProgress(value) {
+  return Math.max(0, Math.min(100, Math.round(toFiniteNumber(value))))
+}
+
+function parseDateTime(value) {
+  const date = new Date(value ?? '')
+
+  return Number.isNaN(date.getTime()) ? null : date
+}
+
+function getEmbyTaskLastExecutionResult(task) {
+  return task?.LastExecutionResult ?? task?.lastExecutionResult ?? task?.LastResult ?? null
+}
+
+function getEmbyTaskRunSnapshot(task, definition, previousSchedule = {}) {
+  const lastResult = getEmbyTaskLastExecutionResult(task)
+  const state = String(task?.State ?? task?.Status ?? task?.state ?? '').trim()
+  const normalizedState = state.toLowerCase()
+  const rawProgress =
+    task?.CurrentProgressPercentage ??
+    task?.CurrentProgress ??
+    task?.ProgressPercentage ??
+    task?.Progress ??
+    task?.PercentComplete
+  const currentProgress = clampProgress(rawProgress)
+  const lastTriggeredAt = parseDateTime(previousSchedule.lastTriggeredAt)
+  const resultEndAt = parseDateTime(
+    lastResult?.EndTimeUtc ??
+      lastResult?.EndTime ??
+      lastResult?.CompletedAt ??
+      lastResult?.Date ??
+      lastResult?.Time,
+  )
+  const resultStatus = String(lastResult?.Status ?? lastResult?.Result ?? '').toLowerCase()
+  const resultAfterTrigger =
+    Boolean(lastTriggeredAt && resultEndAt) && resultEndAt.getTime() >= lastTriggeredAt.getTime()
+  let runStatus = previousSchedule.runStatus || 'idle'
+  let runProgress = previousSchedule.runProgress ?? 0
+  let runMessage = previousSchedule.runMessage || '未执行'
+
+  if (normalizedState.includes('running')) {
+    runStatus = 'running'
+    runProgress = currentProgress
+    runMessage = '正在执行'
+  } else if (resultAfterTrigger) {
+    if (resultStatus.includes('fail') || resultStatus.includes('error')) {
+      runStatus = 'failed'
+      runProgress = currentProgress
+      runMessage = '执行失败'
+    } else {
+      runStatus = 'succeeded'
+      runProgress = 100
+      runMessage = '执行完成'
+    }
+  } else if (['queued', 'running'].includes(previousSchedule.runStatus)) {
+    runStatus = 'queued'
+    runProgress = previousSchedule.runProgress ?? 0
+    runMessage = '已提交执行，等待 Emby 更新状态'
+  }
+
+  return {
+    embyTaskId: getEmbyScheduledTaskId(task),
+    embyTaskName: String(task?.Name ?? definition.taskName),
+    embyTaskState: state || 'Unknown',
+    lastError: runStatus === 'failed' ? String(lastResult?.ErrorMessage ?? '') : '',
+    lastFinishedAt: resultAfterTrigger && resultEndAt ? resultEndAt.toISOString() : '',
+    runMessage,
+    runProgress,
+    runStatus,
+    runUpdatedAt: new Date().toISOString(),
+    taskId: definition.taskId,
+    taskName: definition.taskName,
+  }
+}
+
+async function updateStrmAssistantTaskRunState(taskId, patch, baseUrl = '') {
+  const definition = getStrmAssistantTaskDefinition(taskId)
+  const currentSettings = await readSettings(baseUrl)
+  const previousSchedule = currentSettings.strmAssistant?.taskSchedules?.[definition.taskId] ?? {}
+  const now = new Date().toISOString()
+  const nextSchedule = {
+    enabled: previousSchedule.enabled === true,
+    intervalHours: previousSchedule.intervalHours || 1,
+    mode: previousSchedule.mode || 'hourly',
+    modes:
+      Array.isArray(previousSchedule.modes) && previousSchedule.modes.length > 0
+        ? previousSchedule.modes
+        : ['hourly'],
+    taskId: definition.taskId,
+    taskName: previousSchedule.taskName || definition.taskName,
+    updatedAt: previousSchedule.updatedAt || now,
+    ...previousSchedule,
+    ...patch,
+    runUpdatedAt: patch.runUpdatedAt || now,
+  }
+  const taskSchedules = {
+    ...(currentSettings.strmAssistant?.taskSchedules ?? {}),
+    [definition.taskId]: nextSchedule,
+  }
+
+  await updateSettingsSection('strmAssistant', { taskSchedules }, baseUrl)
+
+  return nextSchedule
+}
+
+async function getStrmAssistantTaskRun(taskId, baseUrl = '') {
+  const definition = getStrmAssistantTaskDefinition(taskId)
+  const settings = await readSettings(baseUrl)
+  const previousSchedule = settings.strmAssistant?.taskSchedules?.[definition.taskId] ?? {}
+  const tasks = await fetchEmbyScheduledTasks(settings)
+  const task = findStrmAssistantScheduledTask(tasks, definition, previousSchedule.embyTaskId)
+
+  if (!task) {
+    const nextSchedule = await updateStrmAssistantTaskRunState(
+      definition.taskId,
+      {
+        lastError: '未在 Emby 计划任务中找到对应的神医助手任务',
+        runMessage: '未找到 Emby 任务',
+        runProgress: previousSchedule.runProgress ?? 0,
+        runStatus: 'failed',
+      },
+      baseUrl,
+    )
+
+    return {
+      schedule: nextSchedule,
+      status: await getEmbyPluginStatus(baseUrl),
+    }
+  }
+
+  const snapshot = getEmbyTaskRunSnapshot(task, definition, previousSchedule)
+  const nextSchedule = await updateStrmAssistantTaskRunState(definition.taskId, snapshot, baseUrl)
+
+  return {
+    schedule: nextSchedule,
+    status: await getEmbyPluginStatus(baseUrl),
+  }
+}
+
+async function runStrmAssistantTaskOnce(taskId, baseUrl = '') {
+  const definition = getStrmAssistantTaskDefinition(taskId)
+  const settings = await readSettings(baseUrl)
+  const tasks = await fetchEmbyScheduledTasks(settings)
+  const previousSchedule = settings.strmAssistant?.taskSchedules?.[definition.taskId] ?? {}
+  const task = findStrmAssistantScheduledTask(tasks, definition, previousSchedule.embyTaskId)
+
+  if (!task) {
+    throw new Error('未在 Emby 计划任务中找到对应的神医助手任务，请确认 Emby 已重启且插件已生效')
+  }
+
+  const embyTaskId = getEmbyScheduledTaskId(task)
+
+  if (!embyTaskId) {
+    throw new Error('Emby 返回的计划任务缺少任务 ID')
+  }
+
+  await requestEmbyApi(settings, `/ScheduledTasks/Running/${encodeURIComponent(embyTaskId)}`, {
+    method: 'POST',
+  })
+
+  const schedule = await updateStrmAssistantTaskRunState(
+    definition.taskId,
+    {
+      embyTaskId,
+      embyTaskName: String(task?.Name ?? definition.taskName),
+      embyTaskState: String(task?.State ?? task?.Status ?? 'Submitted'),
+      lastError: '',
+      lastTriggeredAt: new Date().toISOString(),
+      runMessage: '已提交执行',
+      runProgress: 0,
+      runStatus: 'queued',
+    },
+    baseUrl,
+  )
+
+  return {
+    schedule,
     status: await getEmbyPluginStatus(baseUrl),
   }
 }
@@ -4442,6 +4822,51 @@ const server = createServer(async (request, response) => {
       sendJson(response, 400, {
         ok: false,
         title: '保存神医助手计划任务失败',
+        message: getErrorMessage(error),
+      })
+    }
+    return
+  }
+
+  const strmAssistantRunRoute = new URL(
+    request.url || '/',
+    'http://openstrmbridge.local',
+  ).pathname.match(/^\/api\/strm-assistant\/task-runs\/([^/]+)$/)
+
+  if (strmAssistantRunRoute && request.method === 'POST') {
+    try {
+      sendJson(
+        response,
+        200,
+        await runStrmAssistantTaskOnce(
+          decodeURIComponent(strmAssistantRunRoute[1]),
+          getRequestOrigin(request),
+        ),
+      )
+    } catch (error) {
+      sendJson(response, 400, {
+        ok: false,
+        title: '执行神医助手计划任务失败',
+        message: getErrorMessage(error),
+      })
+    }
+    return
+  }
+
+  if (strmAssistantRunRoute && request.method === 'GET') {
+    try {
+      sendJson(
+        response,
+        200,
+        await getStrmAssistantTaskRun(
+          decodeURIComponent(strmAssistantRunRoute[1]),
+          getRequestOrigin(request),
+        ),
+      )
+    } catch (error) {
+      sendJson(response, 400, {
+        ok: false,
+        title: '读取神医助手计划任务进度失败',
         message: getErrorMessage(error),
       })
     }

@@ -3,12 +3,15 @@ import type {
   StrmAssistantDefaults,
   StrmAssistantStartResult,
   StrmAssistantStatus,
+  StrmAssistantTaskRunResult,
   StrmAssistantTaskSchedule,
 } from '../../shared/types/domain'
 
 export interface StrmAssistantService {
   getCachedDefaults(): StrmAssistantDefaults | null
   getDefaults(options?: { force?: boolean }): Promise<StrmAssistantDefaults>
+  getTaskRun(taskId: string): Promise<StrmAssistantTaskRunResult>
+  runTaskOnce(taskId: string): Promise<StrmAssistantTaskRunResult>
   setPluginDirectory(pluginDirectory: string): Promise<StrmAssistantDefaults>
   setTaskSchedule(schedule: StrmAssistantTaskSchedule): Promise<StrmAssistantDefaults>
   start(): Promise<StrmAssistantStartResult>
@@ -92,6 +95,24 @@ export const strmAssistantService: StrmAssistantService = {
     })
 
     return cacheDefaults(await readJsonResponse<StrmAssistantDefaults>(response))
+  },
+  async getTaskRun(taskId) {
+    const response = await fetch(`${strmAssistantUrl}/task-runs/${encodeURIComponent(taskId)}`)
+    const result = await readJsonResponse<StrmAssistantTaskRunResult>(response)
+
+    cacheStatus(result.status)
+
+    return result
+  },
+  async runTaskOnce(taskId) {
+    const response = await fetch(`${strmAssistantUrl}/task-runs/${encodeURIComponent(taskId)}`, {
+      method: 'POST',
+    })
+    const result = await readJsonResponse<StrmAssistantTaskRunResult>(response)
+
+    cacheStatus(result.status)
+
+    return result
   },
   async start() {
     const response = await fetch(`${strmAssistantUrl}/start`, {

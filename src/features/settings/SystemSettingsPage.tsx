@@ -354,6 +354,13 @@ function Proxy302SettingsTab() {
         <Input placeholder="http://127.0.0.1:8096" />
       </Form.Item>
       <Form.Item
+        extra="用于神医助手计划任务的立即执行和进度读取，可在 Emby 控制台的 API Keys 中创建。"
+        label="Emby API Key"
+        name="embyApiKey"
+      >
+        <Input.Password placeholder="请输入 Emby API Key" />
+      </Form.Item>
+      <Form.Item
         extra="Emby 媒体库里看到的 STRM 根目录，例如 Docker 容器内挂载路径 /media/strm。"
         label="Emby 媒体挂载路径"
         name="mountPath"
@@ -594,7 +601,11 @@ function AccountSecuritySettingsTab() {
           name="username"
           rules={[{ required: true, message: '请输入新账号' }]}
         >
-          <Input autoComplete="username" placeholder="请输入新账号" prefix={<AppIcon name="user" />} />
+          <Input
+            autoComplete="username"
+            placeholder="请输入新账号"
+            prefix={<AppIcon name="user" />}
+          />
         </Form.Item>
         <Form.Item
           label="新密码"
@@ -635,7 +646,9 @@ function AccountSecuritySettingsTab() {
         </Form.Item>
       </div>
 
-      {saved ? <Alert message="账号密码已保存，下次登录将使用新凭据" showIcon type="success" /> : null}
+      {saved ? (
+        <Alert message="账号密码已保存，下次登录将使用新凭据" showIcon type="success" />
+      ) : null}
       <div className="settings-save-row">
         <Button htmlType="submit" icon={<AppIcon name="shield" />} type="primary">
           保存账号密码

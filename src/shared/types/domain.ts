@@ -132,16 +132,26 @@ export interface StrmAssistantCapabilities {
 }
 
 export type StrmAssistantTaskScheduleMode = 'hourly' | 'after-strm'
+export type StrmAssistantTaskRunStatus = 'idle' | 'queued' | 'running' | 'succeeded' | 'failed'
 
 export interface StrmAssistantTaskSchedule {
+  embyTaskId?: string
+  embyTaskName?: string
+  embyTaskState?: string
   enabled: boolean
   intervalHours: number
+  lastError?: string
+  lastFinishedAt?: string
   lastSourceTaskFinishedAt?: string
   lastSourceTaskId?: string
   lastSourceTaskName?: string
   lastTriggeredAt?: string
   mode?: StrmAssistantTaskScheduleMode
   modes: StrmAssistantTaskScheduleMode[]
+  runMessage?: string
+  runProgress?: number
+  runStatus?: StrmAssistantTaskRunStatus
+  runUpdatedAt?: string
   taskId: string
   taskName: string
   updatedAt?: string
@@ -170,6 +180,11 @@ export interface StrmAssistantDefaults extends StrmAssistantValues {
   status: StrmAssistantStatus
 }
 
+export interface StrmAssistantTaskRunResult {
+  schedule: StrmAssistantTaskSchedule
+  status: StrmAssistantStatus
+}
+
 export interface StrmSettings {
   mediaExtensions: string
   minMediaSizeMb: number
@@ -186,6 +201,7 @@ export interface StrmSettings {
 export interface Proxy302Settings {
   apiSecret?: string
   configPath?: string
+  embyApiKey?: string
   enabled: boolean
   engine?: 'go-emby2openlist'
   healthy: boolean
