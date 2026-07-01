@@ -10,6 +10,7 @@ SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 DEFAULT_PORT="${OPENSTRMBRIDGE_DEFAULT_PORT:-5174}"
 DEFAULT_HOST="${OPENSTRMBRIDGE_DEFAULT_HOST:-0.0.0.0}"
 MANAGER_BIN="/usr/local/bin/openstrmbridge"
+MANAGER_DOWNLOAD_URL="https://github.com/${REPO}/releases/latest/download/openstrmbridge-manager.sh"
 
 info() {
 	printf '[%s] %s\n' "$APP_NAME" "$*"
@@ -206,7 +207,99 @@ install_manager_command() {
 
 	if [ -r "$source_path" ]; then
 		install -m 755 "$source_path" "$MANAGER_BIN"
+	elif command -v curl >/dev/null 2>&1; then
+		curl -fsSL "$MANAGER_DOWNLOAD_URL" -o "$MANAGER_BIN"
+		chmod 755 "$MANAGER_BIN"
+	elif command -v wget >/dev/null 2>&1; then
+		wget -qO "$MANAGER_BIN" "$MANAGER_DOWNLOAD_URL"
+		chmod 755 "$MANAGER_BIN"
 	fi
+}
+
+remove_install_dir() {
+	case "$INSTALL_DIR" in
+	"" | "/" | "/opt" | "/usr" | "/usr/local" | "/usr/local/bin" | "/etc")
+		die "安装目录异常，拒绝删除：${INSTALL_DIR}"
+		;;
+	esac
+
+	if [ -d "$INSTALL_DIR" ]; then
+		rm -rf "$INSTALL_DIR"
+	fi
+}
+
+systemd_available() {
+	command -v systemctl >/dev/null 2>&1
+}
+
+is_installed() {
+	[ -d "$INSTALL_DIR" ] &&
+		[ -f "$INSTALL_DIR/server/storage-check-server.mjs" ] &&
+		[ -x "$INSTALL_DIR/runtime/node/bin/node" ]
+}
+
+service_file_exists() {
+	[ -f "$SERVICE_FILE" ]
+}
+
+get_service_active_state() {
+	if ! systemd_available || ! service_file_exists; then
+		printf 'unknown'
+		return
+	fi
+
+	systemctl is-active "$SERVICE_NAME" 2>/dev/null || true
+}
+
+get_service_enabled_state() {
+	if ! systemd_available || ! service_file_exists; then
+		printf 'unknown'
+		return
+	fi
+
+	systemctl is-enabled "$SERVICE_NAME" 2>/dev/null || true
+}
+
+print_program_status() {
+	local installed_label service_file_label active_state active_label enabled_state host port access_url
+
+	if is_installed; then
+		installed_label="已安装"
+	else
+		installed_label="未安装"
+	fi
+
+	if service_file_exists; then
+		service_file_label="已创建"
+	else
+		service_file_label="未创建"
+	fi
+
+	active_state="$(get_service_active_state)"
+
+	case "$active_state" in
+	active) active_label="已启动" ;;
+	inactive | failed | deactivating | unknown | "") active_label="已停止" ;;
+	*) active_label="$active_state" ;;
+	esac
+
+	enabled_state="$(get_service_enabled_state)"
+	host="$(read_env_value OPENSTRMBRIDGE_BACKEND_HOST "$DEFAULT_HOST")"
+	port="$(read_env_value OPENSTRMBRIDGE_BACKEND_PORT "$DEFAULT_PORT")"
+	access_url="http://${host}:${port}"
+
+	cat <<STATUS
+
+${APP_NAME} 状态
+安装状态：${installed_label}
+服务文件：${service_file_label}
+运行状态：${active_label}
+开机启动：${enabled_state}
+安装目录：${INSTALL_DIR}
+配置文件：${ENV_FILE}
+访问地址：${access_url}
+
+STATUS
 }
 
 stop_service() {
@@ -449,9 +542,46 @@ close_app() {
 	info "服务已关闭。"
 }
 
+delete_app() {
+	require_root
+
+	print_program_status
+
+	local confirm
+	read_prompt confirm "删除将停止服务并移除安装目录、systemd 服务、环境文件和管理命令。请输入 DELETE 确认: "
+
+	if [ "$confirm" != "DELETE" ]; then
+		info "已取消删除。"
+		return
+	fi
+
+	stop_service
+
+	if systemd_available; then
+		systemctl disable "$SERVICE_NAME" >/dev/null 2>&1 || true
+	fi
+
+	rm -f "$SERVICE_FILE"
+
+	if systemd_available; then
+		systemctl daemon-reload || true
+		systemctl reset-failed "$SERVICE_NAME" >/dev/null 2>&1 || true
+	fi
+
+	remove_install_dir
+	rm -f "$ENV_FILE"
+	rm -f "$MANAGER_BIN"
+
+	info "程序已删除。"
+}
+
 show_status() {
 	require_root
-	systemctl status "$SERVICE_NAME" --no-pager || true
+	print_program_status
+
+	if systemd_available && service_file_exists; then
+		systemctl status "$SERVICE_NAME" --no-pager || true
+	fi
 }
 
 print_menu() {
@@ -463,7 +593,8 @@ ${APP_NAME} 管理脚本
 3. 更新程序
 4. 更换端口
 5. 重置账号密码
-6. 查看状态
+6. 检查状态
+7. 删除程序
 0. 退出
 
 MENU
@@ -485,6 +616,7 @@ main_menu() {
 		;;
 	5) reset_account_password ;;
 	6) show_status ;;
+	7) delete_app ;;
 	0) exit 0 ;;
 	*) die "无效选择。" ;;
 	esac
@@ -500,6 +632,7 @@ port)
 	change_port_interactive
 	;;
 reset-password | reset) reset_account_password ;;
+delete | uninstall | remove) delete_app ;;
 status) show_status ;;
 menu) main_menu ;;
 *) die "未知命令：$1" ;;
