@@ -10,7 +10,7 @@ SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 DEFAULT_PORT="${OPENSTRMBRIDGE_DEFAULT_PORT:-5174}"
 DEFAULT_HOST="${OPENSTRMBRIDGE_DEFAULT_HOST:-0.0.0.0}"
 MANAGER_BIN="/usr/local/bin/openstrmbridge"
-MANAGER_DOWNLOAD_URL="https://github.com/${REPO}/releases/latest/download/openstrmbridge-manager.sh"
+MANAGER_DOWNLOAD_URL="https://raw.githubusercontent.com/${REPO}/main/scripts/openstrmbridge-manager.sh"
 
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
 	COLOR_RESET=$'\033[0m'
