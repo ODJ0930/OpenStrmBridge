@@ -206,7 +206,7 @@ set_env_value() {
 ensure_env_file() {
 	local port public_host
 	port="$(read_env_value OPENSTRMBRIDGE_BACKEND_PORT "$DEFAULT_PORT")"
-	public_host="$(format_url_host "$(detect_access_host "$DEFAULT_HOST")")"
+	public_host="$(format_url_host "$(detect_public_access_host "$DEFAULT_HOST")")"
 
 	set_env_value OPENSTRMBRIDGE_BACKEND_HOST "$DEFAULT_HOST"
 	set_env_value OPENSTRMBRIDGE_BACKEND_PORT "$port"
@@ -321,11 +321,44 @@ detect_primary_ip() {
 	printf '127.0.0.1'
 }
 
-detect_access_host() {
-	local bind_host="$1"
+detect_public_ip() {
+	local endpoint ip_addr
+
+	for endpoint in https://api.ipify.org https://ifconfig.me/ip https://icanhazip.com; do
+		if command -v curl >/dev/null 2>&1; then
+			ip_addr="$(curl -fsSL --connect-timeout 2 --max-time 4 "$endpoint" 2>/dev/null || true)"
+		elif command -v wget >/dev/null 2>&1; then
+			ip_addr="$(wget -qO- -T 4 "$endpoint" 2>/dev/null || true)"
+		else
+			return 1
+		fi
+
+		ip_addr="$(printf '%s' "$ip_addr" | tr -d '[:space:]')"
+
+		case "$ip_addr" in
+		"" | *[!0-9a-fA-F:.]*) ;;
+		*)
+			printf '%s' "$ip_addr"
+			return
+			;;
+		esac
+	done
+
+	return 1
+}
+
+detect_public_access_host() {
+	local bind_host="$1" public_host
 
 	case "$bind_host" in
 	0.0.0.0 | "::" | "[::]" | "")
+		public_host="$(detect_public_ip || true)"
+
+		if [ -n "$public_host" ]; then
+			printf '%s' "$public_host"
+			return
+		fi
+
 		detect_primary_ip
 		;;
 	*)
@@ -349,7 +382,7 @@ format_url_host() {
 }
 
 print_program_status() {
-	local installed_label service_file_label active_state active_label enabled_state enabled_label bind_host port access_host url_host listen_label access_label
+	local installed_label service_file_label active_state active_label enabled_state enabled_label bind_host port public_host local_host public_url_host local_url_host listen_label public_label local_label
 
 	if is_installed; then
 		installed_label="$(paint "$COLOR_GREEN" "已安装")"
@@ -384,13 +417,33 @@ print_program_status() {
 	port="$(read_env_value OPENSTRMBRIDGE_BACKEND_PORT "")"
 
 	if [ -n "$bind_host" ] && [ -n "$port" ]; then
-		access_host="$(detect_access_host "$bind_host")"
-		url_host="$(format_url_host "$access_host")"
 		listen_label="${bind_host}:${port}"
-		access_label="$(paint "$COLOR_CYAN" "http://${url_host}:${port}")"
+
+		case "$bind_host" in
+		0.0.0.0 | "::" | "[::]" | "")
+			public_host="$(detect_public_ip || true)"
+			local_host="$(detect_primary_ip)"
+
+			if [ -n "$public_host" ]; then
+				public_url_host="$(format_url_host "$public_host")"
+				public_label="$(paint "$COLOR_CYAN" "http://${public_url_host}:${port}")"
+			else
+				public_label="$(paint "$COLOR_YELLOW" "未识别")"
+			fi
+
+			local_url_host="$(format_url_host "$local_host")"
+			local_label="$(paint "$COLOR_DIM" "http://${local_url_host}:${port}")"
+			;;
+		*)
+			public_url_host="$(format_url_host "$bind_host")"
+			public_label="$(paint "$COLOR_CYAN" "http://${public_url_host}:${port}")"
+			local_label="$(paint "$COLOR_DIM" "-")"
+			;;
+		esac
 	else
 		listen_label="$(paint "$COLOR_YELLOW" "未配置")"
-		access_label="$(paint "$COLOR_YELLOW" "未配置")"
+		public_label="$(paint "$COLOR_YELLOW" "未配置")"
+		local_label="$(paint "$COLOR_YELLOW" "未配置")"
 	fi
 
 	cat <<STATUS
@@ -403,7 +456,8 @@ $(paint "$COLOR_BOLD" "${APP_NAME} 状态")
 监听地址：${listen_label}
 安装目录：${INSTALL_DIR}
 配置文件：${ENV_FILE}
-访问地址：${access_label}
+公网地址：${public_label}
+内网地址：${local_label}
 
 STATUS
 }
@@ -518,7 +572,7 @@ validate_port() {
 set_port() {
 	local port="$1" public_host
 	validate_port "$port" || die "端口无效：${port}"
-	public_host="$(format_url_host "$(detect_access_host "$DEFAULT_HOST")")"
+	public_host="$(format_url_host "$(detect_public_access_host "$DEFAULT_HOST")")"
 
 	set_env_value OPENSTRMBRIDGE_BACKEND_HOST "$DEFAULT_HOST"
 	set_env_value OPENSTRMBRIDGE_BACKEND_PORT "$port"
