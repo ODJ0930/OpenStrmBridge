@@ -2666,6 +2666,7 @@ function createStrmIndexEntry(
   outputFile,
   relativePath,
   entryPath,
+  sourceUrl,
 ) {
   const outputDirectory = getTaskOutputDirectory(task.name, strmSettings.outputRoot)
   const strmRelativePath = path.relative(outputDirectory, outputFile) || relativePath
@@ -2673,7 +2674,7 @@ function createStrmIndexEntry(
   return {
     relativePath: strmRelativePath,
     sourcePath: entryPath,
-    sourceUrl: createStrmUrl(storage, entryPath),
+    sourceUrl,
     storageId: storage.id,
     storageName: storage.name,
     strmEmbyPath: joinPosixPath(getTaskOutputEmbyPath(task.name, settings), strmRelativePath),
@@ -2691,7 +2692,130 @@ function getUnencodedRemotePath(remotePath) {
   return normalizeRemotePath(remotePath).split('/').filter(Boolean).join('/').replace(/^/, '/')
 }
 
-function createStrmUrl(storage, entryPath) {
+function isAList115SignEnabled(storage) {
+  return (
+    storage?.alist115?.enabled === true &&
+    (storage.accessMethod === 'openlist' || storage.accessMethod === 'webdav')
+  )
+}
+
+function inferAListEndpointFromWebDav(endpoint) {
+  const normalizedEndpoint = normalizeEndpoint(endpoint)
+
+  if (!normalizedEndpoint) {
+    return ''
+  }
+
+  try {
+    const url = new URL(normalizedEndpoint)
+    url.pathname = url.pathname.replace(/\/dav(?:\/.*)?$/i, '') || '/'
+    url.search = ''
+    url.hash = ''
+    return normalizeEndpoint(url.toString())
+  } catch {
+    return normalizedEndpoint
+  }
+}
+
+function getAList115Endpoint(storage) {
+  return normalizeEndpoint(
+    storage.alist115?.endpoint ||
+      (storage.accessMethod === 'openlist'
+        ? storage.endpoint
+        : inferAListEndpointFromWebDav(storage.endpoint)),
+  )
+}
+
+function getAList115Token(storage) {
+  return String(storage.alist115?.token || storage.openlist?.token || '').trim()
+}
+
+function getWebDavAListPrefix(storage) {
+  try {
+    const pathname = safeDecodePathname(new URL(normalizeEndpoint(storage.endpoint)).pathname)
+    const match = pathname.match(/\/dav(?:\/(.*))?$/i)
+
+    return normalizeRemotePath(match?.[1] || '')
+  } catch {
+    return '/'
+  }
+}
+
+function getAList115ApiPath(storage, entryPath) {
+  if (storage.accessMethod !== 'webdav') {
+    return normalizeRemotePath(entryPath)
+  }
+
+  const prefix = getWebDavAListPrefix(storage)
+
+  if (prefix === '/') {
+    return normalizeRemotePath(entryPath)
+  }
+
+  return joinRemotePath(prefix, normalizeRemotePath(entryPath))
+}
+
+function createAListDownloadUrl(storage, entryPath) {
+  const baseUrl = normalizeEndpoint(
+    storage.accessMethod === 'openlist'
+      ? storage.openlist?.strmBaseUrl || storage.endpoint
+      : getAList115Endpoint(storage),
+  )
+  const apiPath = getAList115ApiPath(storage, entryPath)
+  const remotePath =
+    storage.openlist?.enableUrlEncoding === false
+      ? getUnencodedRemotePath(apiPath)
+      : encodePathSegments(apiPath)
+
+  return `${baseUrl}/d${remotePath}`
+}
+
+function appendSignToUrl(rawUrl, sign) {
+  const url = new URL(rawUrl)
+  url.searchParams.set('sign', sign)
+  return url.toString()
+}
+
+async function getAList115Sign(storage, entryPath, context = {}) {
+  const endpoint = context.alist115Endpoint || getAList115Endpoint(storage)
+  const token = context.alist115Token || getAList115Token(storage)
+  const apiPath = getAList115ApiPath(storage, entryPath)
+
+  if (!endpoint) {
+    throw new Error('115 签名缺少 AList 管理地址')
+  }
+
+  if (!token) {
+    throw new Error('115 签名缺少可调用 /api/fs/get 的 AList Token')
+  }
+
+  context.alist115Endpoint = endpoint
+  context.alist115Token = token
+
+  const fileInfo = await requestOpenListApi(endpoint, '/api/fs/get', token, {
+    body: JSON.stringify({
+      path: apiPath,
+      password: '',
+    }),
+    method: 'POST',
+  })
+  const sign = String(fileInfo?.sign ?? '').trim()
+
+  if (!sign) {
+    throw new Error(`AList 未返回 sign：${apiPath}`)
+  }
+
+  return sign
+}
+
+async function createStrmUrl(storage, entryPath, context = {}) {
+  if (isAList115SignEnabled(storage)) {
+    return appendSignToUrl(
+      createAListDownloadUrl(storage, entryPath),
+      await getAList115Sign(storage, entryPath, context),
+    )
+  }
+
   if (storage.accessMethod === 'openlist') {
     const baseUrl = normalizeEndpoint(storage.openlist?.strmBaseUrl || storage.endpoint)
     const remotePath =
@@ -2768,6 +2892,7 @@ async function executeTask(task, storage, strmSettings, settings = {}) {
     `目录时间检查: ${task.directoryTimeCheck ? 'true' : 'false'}`,
     `增量生成模式: ${task.incremental ? 'true' : 'false'}`,
     `预先刷新 OpenList 缓存: ${task.preRefreshOpenListCache ? 'true' : 'false'}`,
+    `115 签名: ${isAList115SignEnabled(storage) ? 'true' : 'false'}`,
     `媒体后缀: ${strmSettings.mediaExtensions}`,
     `媒体大小阈值: ${strmSettings.minMediaSizeMb} MB`,
     '------------------------------------------------------------',
@@ -2799,6 +2924,7 @@ async function executeTask(task, storage, strmSettings, settings = {}) {
   let skipped = 0
   let failed = 0
   const strmIndexEntries = []
+  const strmUrlContext = {}
 
   logLines.push(
     `扫描完成，共读取 ${scannedDirectories} 个目录，发现 ${mediaEntries.length} 个媒体文件。`,
@@ -2808,9 +2934,10 @@ async function executeTask(task, storage, strmSettings, settings = {}) {
   for (const entry of mediaEntries) {
     const relativePath = getEntryRelativePath(storage, task.path, entry)
     const outputFile = getOutputFilePath(outputDirectory, relativePath)
-    const sourceUrl = createStrmUrl(storage, entry.path)
 
     try {
+      const sourceUrl = await createStrmUrl(storage, entry.path, strmUrlContext)
+
       if (task.incremental && (await pathExists(outputFile))) {
         skipped += 1
         strmIndexEntries.push(
@@ -2822,6 +2949,7 @@ async function executeTask(task, storage, strmSettings, settings = {}) {
             outputFile,
             relativePath,
             entry.path,
+            sourceUrl,
           ),
         )
         continue
@@ -2838,6 +2966,7 @@ async function executeTask(task, storage, strmSettings, settings = {}) {
           outputFile,
           relativePath,
           entry.path,
+          sourceUrl,
         ),
       )
       generated += 1

@@ -61,6 +61,11 @@ export interface StorageItem {
     enableUrlEncoding: boolean
     token?: string
   }
+  alist115?: {
+    enabled: boolean
+    endpoint?: string
+    token?: string
+  }
   webdav?: {
     username?: string
     password?: string
