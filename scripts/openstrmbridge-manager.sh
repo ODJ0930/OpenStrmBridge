@@ -312,6 +312,24 @@ start_service() {
 	systemctl enable --now "$SERVICE_NAME"
 }
 
+start_app() {
+	require_root
+
+	if ! is_installed; then
+		die "尚未安装 ${APP_NAME}。"
+	fi
+
+	ensure_env_file
+
+	if ! service_file_exists; then
+		write_service
+	fi
+
+	start_service
+	info "服务已启动。"
+	print_program_status
+}
+
 restart_service_if_active() {
 	if systemctl is-active --quiet "$SERVICE_NAME"; then
 		systemctl restart "$SERVICE_NAME"
@@ -521,6 +539,7 @@ install_app() {
 	prompt_optional_port_change
 	start_service
 	info "安装完成，服务已启动。"
+	print_program_status
 }
 
 update_app() {
@@ -534,12 +553,14 @@ update_app() {
 	install_manager_command
 	start_service
 	info "更新完成，服务已启动。"
+	print_program_status
 }
 
 close_app() {
 	require_root
 	stop_service
 	info "服务已关闭。"
+	print_program_status
 }
 
 delete_app() {
@@ -573,15 +594,7 @@ delete_app() {
 	rm -f "$MANAGER_BIN"
 
 	info "程序已删除。"
-}
-
-show_status() {
-	require_root
 	print_program_status
-
-	if systemd_available && service_file_exists; then
-		systemctl status "$SERVICE_NAME" --no-pager || true
-	fi
 }
 
 print_menu() {
@@ -589,11 +602,11 @@ print_menu() {
 
 ${APP_NAME} 管理脚本
 1. 安装 / 重装
-2. 关闭服务
-3. 更新程序
-4. 更换端口
-5. 重置账号密码
-6. 检查状态
+2. 启动服务
+3. 关闭服务
+4. 更新程序
+5. 更换端口
+6. 重置账号密码
 7. 删除程序
 0. 退出
 
@@ -602,20 +615,21 @@ MENU
 
 main_menu() {
 	local choice
+	print_program_status
 	print_menu
 	read_prompt choice "请选择功能: "
 
 	case "$choice" in
 	1) install_app ;;
-	2) close_app ;;
-	3) update_app ;;
-	4)
+	2) start_app ;;
+	3) close_app ;;
+	4) update_app ;;
+	5)
 		require_root
 		ensure_env_file
 		change_port_interactive
 		;;
-	5) reset_account_password ;;
-	6) show_status ;;
+	6) reset_account_password ;;
 	7) delete_app ;;
 	0) exit 0 ;;
 	*) die "无效选择。" ;;
@@ -624,6 +638,7 @@ main_menu() {
 
 case "${1:-menu}" in
 install) install_app ;;
+start) start_app ;;
 stop | close) close_app ;;
 update) update_app ;;
 port)
@@ -633,7 +648,6 @@ port)
 	;;
 reset-password | reset) reset_account_password ;;
 delete | uninstall | remove) delete_app ;;
-status) show_status ;;
 menu) main_menu ;;
 *) die "未知命令：$1" ;;
 esac
