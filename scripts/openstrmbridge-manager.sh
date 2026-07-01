@@ -708,14 +708,14 @@ print_menu() {
 	cat <<MENU
 
 $(paint "$COLOR_BOLD" "${APP_NAME} 管理脚本")
-$(paint "$COLOR_CYAN" "1.") 安装 / 重装
-$(paint "$COLOR_GREEN" "2.") 启动服务
-$(paint "$COLOR_YELLOW" "3.") 关闭服务
-$(paint "$COLOR_CYAN" "4.") 更新程序
-$(paint "$COLOR_CYAN" "5.") 更换端口
-$(paint "$COLOR_CYAN" "6.") 重置账号密码
-$(paint "$COLOR_RED" "7.") 删除程序
-$(paint "$COLOR_DIM" "0.") 退出
+1. 安装 / 重装
+2. 启动服务
+3. 关闭服务
+4. 更新程序
+5. 更换端口
+6. 重置账号密码
+7. 删除程序
+0. 退出
 
 MENU
 }
