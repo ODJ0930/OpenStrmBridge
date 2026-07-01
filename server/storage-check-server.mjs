@@ -1080,6 +1080,22 @@ function getOpenListDirectRoute(url) {
   }
 }
 
+function getStrmRedirectRoute(url) {
+  const pathname = new URL(url, 'http://localhost').pathname
+  const match = pathname.match(/^\/api\/strm\/redirect\/([^/]+)(?:\/(.*))?$/)
+
+  if (!match) {
+    return undefined
+  }
+
+  const encodedRemotePath = match[2] ? `/${match[2]}` : '/'
+
+  return {
+    remotePath: normalizeRemotePath(safeDecodePathname(encodedRemotePath)),
+    storageId: decodeURIComponent(match[1]),
+  }
+}
+
 function joinRemotePath(basePath, name) {
   if (basePath === '/') {
     return `/${name}`
@@ -2696,6 +2712,15 @@ function shouldAppendAListSign(storage) {
   return storage?.accessMethod === 'openlist' || storage?.accessMethod === 'webdav'
 }
 
+function shouldUseStrmRedirect(storage) {
+  return storage?.accessMethod === 'openlist' || storage?.accessMethod === 'webdav'
+}
+
+function createStrmRedirectUrl(storage, entryPath) {
+  const backendBaseUrl = getLocalBackendBaseUrl()
+  return `${backendBaseUrl}/api/strm/redirect/${encodeURIComponent(storage.id)}${encodePathSegments(entryPath)}`
+}
+
 function inferAListEndpointFromWebDav(endpoint) {
   const normalizedEndpoint = normalizeEndpoint(endpoint)
 
@@ -2894,6 +2919,14 @@ async function createStrmUrl(storage, entryPath, context = {}) {
   return path.resolve(entryPath)
 }
 
+async function createStrmTargetUrl(storage, entryPath, context = {}) {
+  if (shouldUseStrmRedirect(storage)) {
+    return createStrmRedirectUrl(storage, entryPath)
+  }
+
+  return createStrmUrl(storage, entryPath, context)
+}
+
 async function collectMediaEntries(storage, scanPath, logLines, strmSettings) {
   const pendingDirectories = [scanPath || '/']
   const mediaEntries = []
@@ -2954,6 +2987,7 @@ async function executeTask(task, storage, strmSettings, settings = {}) {
     `增量生成模式: ${task.incremental ? 'true' : 'false'}`,
     `预先刷新 OpenList 缓存: ${task.preRefreshOpenListCache ? 'true' : 'false'}`,
     `直链签名: ${shouldAppendAListSign(storage) ? 'true' : 'false'}`,
+    `STRM 中转: ${shouldUseStrmRedirect(storage) ? 'true' : 'false'}`,
     `媒体后缀: ${strmSettings.mediaExtensions}`,
     `媒体大小阈值: ${strmSettings.minMediaSizeMb} MB`,
     '------------------------------------------------------------',
@@ -2997,23 +3031,27 @@ async function executeTask(task, storage, strmSettings, settings = {}) {
     const outputFile = getOutputFilePath(outputDirectory, relativePath)
 
     try {
-      const sourceUrl = await createStrmUrl(storage, entry.path, strmUrlContext)
+      const sourceUrl = await createStrmTargetUrl(storage, entry.path, strmUrlContext)
 
       if (task.incremental && (await pathExists(outputFile))) {
-        skipped += 1
-        strmIndexEntries.push(
-          createStrmIndexEntry(
-            task,
-            storage,
-            strmSettings,
-            settings,
-            outputFile,
-            relativePath,
-            entry.path,
-            sourceUrl,
-          ),
-        )
-        continue
+        const currentSourceUrl = await readStrmTarget(outputFile)
+
+        if (currentSourceUrl === sourceUrl) {
+          skipped += 1
+          strmIndexEntries.push(
+            createStrmIndexEntry(
+              task,
+              storage,
+              strmSettings,
+              settings,
+              outputFile,
+              relativePath,
+              entry.path,
+              sourceUrl,
+            ),
+          )
+          continue
+        }
       }
 
       await mkdir(path.dirname(outputFile), { recursive: true })
@@ -4095,6 +4133,38 @@ async function redirectOpenListDirectLink(request, response) {
   }
 }
 
+async function redirectStrmTarget(request, response) {
+  const route = getStrmRedirectRoute(request.url)
+
+  if (!route) {
+    sendJson(response, 404, {
+      ok: false,
+      title: 'Not Found',
+      message: 'STRM 中转接口不存在',
+    })
+    return
+  }
+
+  try {
+    const storages = await readStorages()
+    const storage = storages.find((item) => item.id === route.storageId)
+
+    if (!storage || !shouldUseStrmRedirect(storage)) {
+      throw new Error('未找到可用的 STRM 中转存储')
+    }
+
+    const targetUrl = await createStrmUrl(storage, route.remotePath, {})
+
+    redirectTo(response, targetUrl)
+  } catch (error) {
+    sendJson(response, 502, {
+      ok: false,
+      title: 'STRM 中转失败',
+      message: getErrorMessage(error),
+    })
+  }
+}
+
 async function resolveDirectCandidate(candidate, storages, depth = 0) {
   const value = String(candidate ?? '').trim()
 
@@ -4408,7 +4478,27 @@ function getWebDavRemotePathFromUrl(rawUrl, storage) {
   }
 }
 
+function getStrmRedirectSourcePathFromUrl(rawUrl, storage) {
+  try {
+    const route = getStrmRedirectRoute(rawUrl)
+
+    if (route?.storageId === storage.id) {
+      return route.remotePath
+    }
+  } catch {
+    return ''
+  }
+
+  return ''
+}
+
 function getStorageSourcePathFromTarget(storage, target) {
+  const redirectSourcePath = getStrmRedirectSourcePathFromUrl(target, storage)
+
+  if (redirectSourcePath) {
+    return redirectSourcePath
+  }
+
   if (storage.accessMethod === 'openlist') {
     return getOpenListRemotePathFromUrl(target, storage)
   }
@@ -4941,6 +5031,14 @@ async function serveStaticWeb(request, response) {
 const server = createServer(async (request, response) => {
   if (request.method === 'OPTIONS') {
     sendJson(response, 204, {})
+    return
+  }
+
+  if (
+    (request.method === 'GET' || request.method === 'HEAD') &&
+    getStrmRedirectRoute(request.url)
+  ) {
+    await redirectStrmTarget(request, response)
     return
   }
 
