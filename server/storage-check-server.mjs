@@ -749,7 +749,7 @@ function getDueTaskRunDate(task, now = new Date()) {
 }
 
 function getTaskOutputVirtualPath(taskName, outputRoot = defaultOutputRoot) {
-  return path.join(normalizeOutputRoot(outputRoot), safePathSegment(taskName))
+  return joinPosixPath(normalizeOutputRoot(outputRoot), safePathSegment(taskName))
 }
 
 function getTaskOutputDirectory(taskName, outputRoot = defaultOutputRoot) {
@@ -761,38 +761,125 @@ function getTaskOutputDirectory(taskName, outputRoot = defaultOutputRoot) {
   return path.join(resolvedOutputRoot, safePathSegment(taskName))
 }
 
-function normalizeTask(task, storages, strmSettings) {
-  const taskName = String(task.name ?? '').trim()
-  const schedule = String(task.schedule ?? '').trim() || '*/5 * * * *'
+function firstText(...values) {
+  for (const value of values) {
+    if (typeof value !== 'string') {
+      continue
+    }
+
+    const normalized = value.trim()
+
+    if (normalized) {
+      return normalized
+    }
+  }
+
+  return ''
+}
+
+function firstBoolean(defaultValue, ...values) {
+  for (const value of values) {
+    if (typeof value === 'boolean') {
+      return value
+    }
+  }
+
+  return defaultValue
+}
+
+function normalizeTaskStatus(status) {
+  if (status === 'running' || status === 'failed') {
+    return status
+  }
+
+  return 'idle'
+}
+
+function getTaskStorageId(task, storages) {
+  const storageValue = task.storage && typeof task.storage === 'object' ? task.storage : {}
+  const storageId = firstText(task.storageId, task.storage_id, task.storageID, storageValue.id)
+  const storageName = firstText(
+    typeof task.storage === 'string' ? task.storage : storageValue.name,
+    task.storageName,
+  )
+
+  return (
+    storages.find((item) => item.id === storageId)?.id ??
+    storages.find((item) => item.name === storageName)?.id ??
+    storageId
+  )
+}
+
+function normalizeTask(task, storages, strmSettings, options = {}) {
+  const taskName = firstText(task.name, task.taskName, task.title)
+  const schedule =
+    firstText(task.schedule, task.cron, task.crontab, task.cronExpression) || '*/5 * * * *'
   const outputRoot = strmSettings?.outputRoot ?? defaultOutputRoot
+  const storageId = getTaskStorageId(task, storages)
 
   if (!taskName) {
     throw new Error('缺少任务名称')
   }
 
-  if (!task.storageId) {
+  if (!storageId && !options.allowMissingStorage) {
     throw new Error('缺少任务存储')
   }
 
-  const storage = storages.find((item) => item.id === task.storageId)
+  const storage = storages.find((item) => item.id === storageId)
+  const nextRun = firstText(task.nextRun)
 
   return {
     id: task.id || `task-${Date.now()}`,
     name: taskName,
-    storage: storage?.name ?? task.storage ?? '',
-    storageId: task.storageId,
-    path: String(task.path ?? '').trim() || '/',
+    storage:
+      storage?.name ??
+      firstText(
+        typeof task.storage === 'string' ? task.storage : task.storage?.name,
+        task.storageName,
+      ),
+    storageId,
+    path: firstText(task.path, task.scanPath, task.scan_path, task.sourcePath) || '/',
     schedule,
-    nextRun: calculateNextRun(schedule),
-    status: task.status === 'running' ? 'running' : 'idle',
-    directoryTimeCheck: task.directoryTimeCheck !== false,
-    incremental: task.incremental !== false,
-    preRefreshOpenListCache: task.preRefreshOpenListCache === true,
+    nextRun: options.preserveNextRun && nextRun ? nextRun : calculateNextRun(schedule),
+    status: normalizeTaskStatus(task.status),
+    directoryTimeCheck: firstBoolean(
+      true,
+      task.directoryTimeCheck,
+      task.directoryMtimeCheck,
+      task.enableDirectoryTimeCheck,
+    ),
+    incremental: firstBoolean(true, task.incremental, task.incrementalMode, task.enableIncremental),
+    preRefreshOpenListCache: firstBoolean(
+      false,
+      task.preRefreshOpenListCache,
+      task.preRefreshOpenlistCache,
+      task.refreshOpenListCache,
+      task.preRefreshAlistCache,
+    ),
     outputPath: getTaskOutputVirtualPath(taskName, outputRoot),
     lastRunAt: task.lastRunAt,
     lastResult: task.lastResult,
     lastLog: task.lastLog,
   }
+}
+
+async function readTasksForClient() {
+  const [tasks, storages, settings] = await Promise.all([
+    readTasks(),
+    readStorages(),
+    readSettings(),
+  ])
+
+  return tasks.map((task) => {
+    try {
+      return normalizeTask(task, storages, settings.strm, {
+        allowMissingStorage: true,
+        preserveNextRun: true,
+      })
+    } catch {
+      return task
+    }
+  })
 }
 
 async function upsertTask(task) {
@@ -4365,7 +4452,7 @@ const server = createServer(async (request, response) => {
 
   if (request.method === 'GET' && request.url === '/api/tasks') {
     try {
-      sendJson(response, 200, await readTasks())
+      sendJson(response, 200, await readTasksForClient())
     } catch (error) {
       sendJson(response, 500, {
         ok: false,

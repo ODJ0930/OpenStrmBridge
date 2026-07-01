@@ -46,6 +46,32 @@ const defaultTaskValues: TaskFormValues = {
   preRefreshOpenListCache: false,
 }
 
+interface LegacyTaskFields {
+  cron?: string
+  cronExpression?: string
+  crontab?: string
+  directoryMtimeCheck?: boolean
+  enableDirectoryTimeCheck?: boolean
+  enableIncremental?: boolean
+  incrementalMode?: boolean
+  name?: string
+  path?: string
+  preRefreshAlistCache?: boolean
+  preRefreshOpenlistCache?: boolean
+  refreshOpenListCache?: boolean
+  scanPath?: string
+  scan_path?: string
+  schedule?: string
+  sourcePath?: string
+  storage?: string | { id?: string; name?: string }
+  storageID?: string
+  storageId?: string
+  storageName?: string
+  storage_id?: string
+  taskName?: string
+  title?: string
+}
+
 function safePathSegment(value: string, fallback = 'task') {
   const safeValue = value
     .trim()
@@ -85,15 +111,85 @@ function getDefaultPath(storage: StorageItem | undefined) {
   return storage.rootPath || '/'
 }
 
-function taskToFormValues(task: TaskItem): TaskFormValues {
+function firstText(...values: unknown[]) {
+  for (const value of values) {
+    if (typeof value !== 'string') {
+      continue
+    }
+
+    const normalized = value.trim()
+
+    if (normalized) {
+      return normalized
+    }
+  }
+
+  return ''
+}
+
+function firstBoolean(defaultValue: boolean, ...values: unknown[]) {
+  for (const value of values) {
+    if (typeof value === 'boolean') {
+      return value
+    }
+  }
+
+  return defaultValue
+}
+
+function findTaskStorage(task: LegacyTaskFields, storages: StorageItem[] = []) {
+  const storageObject = typeof task.storage === 'string' ? undefined : task.storage
+  const storageId = firstText(task.storageId, task.storage_id, task.storageID, storageObject?.id)
+  const storageName = firstText(
+    typeof task.storage === 'string' ? task.storage : storageObject?.name,
+    task.storageName,
+  )
+
+  return (
+    storages.find((storage) => storage.id === storageId) ??
+    storages.find((storage) => storage.name === storageName)
+  )
+}
+
+function taskToFormValues(task: TaskItem, storages: StorageItem[] = []): TaskFormValues {
+  const legacyTask = task as LegacyTaskFields
+  const storage = findTaskStorage(legacyTask, storages)
+
   return {
-    name: task.name,
-    storageId: task.storageId,
-    path: task.path,
-    schedule: task.schedule,
-    directoryTimeCheck: task.directoryTimeCheck,
-    incremental: task.incremental,
-    preRefreshOpenListCache: task.preRefreshOpenListCache,
+    name: firstText(legacyTask.name, legacyTask.taskName, legacyTask.title),
+    storageId:
+      storage?.id ?? firstText(legacyTask.storageId, legacyTask.storage_id, legacyTask.storageID),
+    path: firstText(
+      legacyTask.path,
+      legacyTask.scanPath,
+      legacyTask.scan_path,
+      legacyTask.sourcePath,
+    ),
+    schedule: firstText(
+      legacyTask.schedule,
+      legacyTask.cron,
+      legacyTask.crontab,
+      legacyTask.cronExpression,
+    ),
+    directoryTimeCheck: firstBoolean(
+      defaultTaskValues.directoryTimeCheck,
+      task.directoryTimeCheck,
+      legacyTask.directoryMtimeCheck,
+      legacyTask.enableDirectoryTimeCheck,
+    ),
+    incremental: firstBoolean(
+      defaultTaskValues.incremental,
+      task.incremental,
+      legacyTask.incrementalMode,
+      legacyTask.enableIncremental,
+    ),
+    preRefreshOpenListCache: firstBoolean(
+      defaultTaskValues.preRefreshOpenListCache,
+      task.preRefreshOpenListCache,
+      legacyTask.preRefreshOpenlistCache,
+      legacyTask.refreshOpenListCache,
+      legacyTask.preRefreshAlistCache,
+    ),
   }
 }
 
@@ -251,17 +347,28 @@ export function TaskManagementPage() {
     }
 
     if (editingTask) {
-      form.setFieldsValue(taskToFormValues(editingTask))
+      const values = taskToFormValues(editingTask, storages)
+
+      form.resetFields()
+      form.setFieldsValue(values)
+      setPathPickerEntries([])
+      setPathPickerPath(values.path || '/')
+      setPathPickerSelectedPath('')
       return
     }
 
     const firstStorage = storages[0]
-
-    form.setFieldsValue({
+    const values = {
       ...defaultTaskValues,
       storageId: firstStorage?.id ?? '',
       path: getDefaultPath(firstStorage),
-    })
+    }
+
+    form.resetFields()
+    form.setFieldsValue(values)
+    setPathPickerEntries([])
+    setPathPickerPath(values.path)
+    setPathPickerSelectedPath('')
   }, [editingTask, form, storages, taskModalOpen])
 
   useEffect(() => {
@@ -713,11 +820,17 @@ export function TaskManagementPage() {
       </div>
 
       <Modal
-        destroyOnHidden
+        forceRender
         okText="保存"
         open={taskModalOpen}
         title={editingTask ? '编辑任务' : '添加任务'}
         width={760}
+        afterOpenChange={(open) => {
+          if (!open) {
+            form.resetFields()
+            setEditingTask(null)
+          }
+        }}
         onCancel={() => setTaskModalOpen(false)}
         onOk={() => form.submit()}
       >
