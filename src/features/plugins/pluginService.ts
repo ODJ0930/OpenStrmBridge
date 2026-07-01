@@ -26,6 +26,10 @@ async function readJsonResponse<T>(response: Response) {
   const payload = (await response.json()) as T | { message?: string }
 
   if (!response.ok) {
+    if (response.status === 404) {
+      throw new Error('神医助手任务接口未加载，请重启或更新 OpenStrmBridge 后再执行。')
+    }
+
     const message =
       typeof payload === 'object' && payload !== null && 'message' in payload
         ? payload.message

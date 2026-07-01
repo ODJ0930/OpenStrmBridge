@@ -305,7 +305,6 @@ function normalizeProxy302Settings(proxySettings = {}) {
   return {
     apiSecret: String(proxySettings.apiSecret || createSecret(18)),
     configPath: String(proxySettings.configPath || ge2oConfigFile),
-    embyApiKey: String(proxySettings.embyApiKey || proxySettings.mediaServerToken || ''),
     enabled: proxySettings.enabled !== false,
     engine: 'go-emby2openlist',
     healthy: proxySettings.healthy !== false,
@@ -318,6 +317,14 @@ function normalizeProxy302Settings(proxySettings = {}) {
   }
 }
 
+function normalizeEmbySettings(embySettings = {}, proxySettings = {}) {
+  return {
+    apiKey: String(
+      embySettings.apiKey || proxySettings.embyApiKey || proxySettings.mediaServerToken || '',
+    ).trim(),
+  }
+}
+
 function createDefaultSettings(baseUrl = '') {
   const normalizedBaseUrl = normalizeEndpoint(baseUrl)
   const webhookToken = createSecret(12)
@@ -326,8 +333,7 @@ function createDefaultSettings(baseUrl = '') {
     proxy302: {
       apiSecret: createSecret(18),
       configPath: ge2oConfigFile,
-      embyApiKey: '',
-      enabled: true,
+      enabled: false,
       engine: 'go-emby2openlist',
       healthy: true,
       mediaServerUrl: '',
@@ -336,6 +342,9 @@ function createDefaultSettings(baseUrl = '') {
       runtimeStatus: 'stopped',
       sourcePath: ge2oSourceDir,
       servicePort: 8097,
+    },
+    emby: {
+      apiKey: '',
     },
     strmAssistant: {
       pluginDirectory: '',
@@ -363,6 +372,7 @@ function createDefaultSettings(baseUrl = '') {
 function mergeSettings(settings, baseUrl = '') {
   const defaults = createDefaultSettings(baseUrl)
   const nextSettings = {
+    emby: normalizeEmbySettings(settings?.emby, settings?.proxy302),
     proxy302: normalizeProxy302Settings({
       ...defaults.proxy302,
       ...settings?.proxy302,
@@ -425,8 +435,10 @@ async function writeSettings(settings) {
   for (const runtimeKey of [
     'binaryPath',
     'configPath',
+    'embyApiKey',
     'healthy',
     'logTail',
+    'mediaServerToken',
     'runtimeCommand',
     'runtimeStatus',
     'sourcePath',
@@ -2207,14 +2219,27 @@ function getEmbyScheduledTaskId(task) {
 
 function getEmbyApiConfig(settings) {
   const mediaServerUrl = normalizeEndpoint(settings.proxy302?.mediaServerUrl)
-  const embyApiKey = String(settings.proxy302?.embyApiKey || '').trim()
+  const embyApiKey = String(
+    settings.emby?.apiKey ||
+      settings.proxy302?.embyApiKey ||
+      settings.proxy302?.mediaServerToken ||
+      '',
+  ).trim()
 
-  if (!mediaServerUrl) {
-    throw new Error('请先在系统设置的 302代理 中填写 Emby 服务地址')
+  if (!mediaServerUrl && !embyApiKey) {
+    throw new Error(
+      '请先在系统设置中填写 Emby 服务地址，并在 Emby 授权页面填写从 Emby 控制台获取的 API Key。',
+    )
   }
 
   if (!embyApiKey) {
-    throw new Error('请先在系统设置的 302代理 中填写 Emby API Key')
+    throw new Error(
+      '未配置 Emby API Key。请先在 Emby 控制台的 API Keys 中新建秘钥，然后填写到系统设置的 Emby 授权页面。',
+    )
+  }
+
+  if (!mediaServerUrl) {
+    throw new Error('请先在系统设置的 302代理 中填写 Emby 服务地址，代理可保持关闭。')
   }
 
   return {
@@ -4934,6 +4959,28 @@ const server = createServer(async (request, response) => {
       sendJson(response, 400, {
         ok: false,
         title: '保存 302 代理设置失败',
+        message: getErrorMessage(error),
+      })
+    }
+    return
+  }
+
+  if (request.method === 'PUT' && request.url === '/api/settings/emby') {
+    try {
+      const values = await readJsonBody(request)
+      sendJson(
+        response,
+        200,
+        await updateSettingsSection(
+          'emby',
+          normalizeEmbySettings(values),
+          getRequestOrigin(request),
+        ),
+      )
+    } catch (error) {
+      sendJson(response, 400, {
+        ok: false,
+        title: '保存 Emby 授权失败',
         message: getErrorMessage(error),
       })
     }

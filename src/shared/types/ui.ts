@@ -38,7 +38,7 @@ export type AppIconName =
   | 'sparkles'
   | 'user'
 
-export type SettingsTabKey = 'strm' | 'proxy302' | 'webhook' | 'account' | 'about'
+export type SettingsTabKey = 'strm' | 'proxy302' | 'emby' | 'webhook' | 'account' | 'about'
 
 export interface NavItem {
   key: string

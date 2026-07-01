@@ -25,6 +25,7 @@ export const navItems: NavItem[] = Object.entries(routes).map(([key, route]) => 
 export const systemTabs: Array<{ key: SettingsTabKey; label: string }> = [
   { key: 'strm', label: 'STRM 设置' },
   { key: 'proxy302', label: '302代理' },
+  { key: 'emby', label: 'Emby 授权' },
   { key: 'webhook', label: 'Webhook' },
   { key: 'account', label: '账号安全' },
   { key: 'about', label: '关于' },

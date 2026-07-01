@@ -98,6 +98,9 @@ describe('TaskManagementPage', () => {
   beforeEach(() => {
     vi.mocked(storageService.list).mockResolvedValue([storage])
     vi.mocked(settingsService.loadSettings).mockResolvedValue({
+      emby: {
+        apiKey: '',
+      },
       proxy302: {
         enabled: true,
         healthy: true,

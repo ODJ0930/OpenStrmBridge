@@ -1,9 +1,15 @@
 import { getApiBaseUrl } from '../../shared/config/runtimeConfig'
-import type { Proxy302Settings, StrmSettings, WebhookSettings } from '../../shared/types/domain'
+import type {
+  EmbySettings,
+  Proxy302Settings,
+  StrmSettings,
+  WebhookSettings,
+} from '../../shared/types/domain'
 
 export interface AppSettings {
   strm: StrmSettings
   proxy302: Proxy302Settings
+  emby: EmbySettings
   webhook: WebhookSettings
 }
 
@@ -11,14 +17,21 @@ export interface SettingsService {
   getProgramBaseUrl(): string
   getStrmSettings(): StrmSettings
   getProxy302Settings(): Proxy302Settings
+  getEmbySettings(): EmbySettings
   getWebhookSettings(): WebhookSettings
   loadSettings(): Promise<AppSettings>
   saveStrmSettings(settings: StrmSettings): Promise<StrmSettings>
   saveProxy302Settings(settings: Proxy302Settings): Promise<Proxy302Settings>
+  saveEmbySettings(settings: EmbySettings): Promise<EmbySettings>
   saveWebhookSettings(settings: WebhookSettings): Promise<WebhookSettings>
   createStrmPreview(settings: StrmSettings): string
   createWebhookUrl(currentUrl?: string): string
   createSignSecret(): string
+}
+
+type LegacyProxy302Settings = Proxy302Settings & {
+  embyApiKey?: string
+  mediaServerToken?: string
 }
 
 const backendBaseUrl = getApiBaseUrl()
@@ -107,14 +120,19 @@ function getDefaultStrmSettings(): StrmSettings {
 
 function getDefaultProxy302Settings(): Proxy302Settings {
   return {
-    embyApiKey: '',
     engine: 'go-emby2openlist',
-    enabled: true,
+    enabled: false,
     healthy: true,
     mediaServerUrl: '',
     mountPath: '/media/strm',
     runtimeStatus: 'stopped',
     servicePort: 8097,
+  }
+}
+
+function getDefaultEmbySettings(): EmbySettings {
+  return {
+    apiKey: '',
   }
 }
 
@@ -199,12 +217,16 @@ export const settingsService: SettingsService = {
   getProxy302Settings() {
     return getDefaultProxy302Settings()
   },
+  getEmbySettings() {
+    return getDefaultEmbySettings()
+  },
   getWebhookSettings() {
     return normalizeWebhookSettings()
   },
   async loadSettings() {
     if (import.meta.env.MODE === 'test') {
       return {
+        emby: getDefaultEmbySettings(),
         proxy302: getDefaultProxy302Settings(),
         strm: normalizeStrmSettings(),
         webhook: normalizeWebhookSettings(),
@@ -213,8 +235,18 @@ export const settingsService: SettingsService = {
 
     const response = await fetch(settingsUrl)
     const settings = await readJsonResponse<AppSettings>(response)
+    const legacyProxy302Settings = settings.proxy302 as LegacyProxy302Settings
 
     return {
+      emby: {
+        ...getDefaultEmbySettings(),
+        ...settings.emby,
+        apiKey:
+          settings.emby?.apiKey ||
+          legacyProxy302Settings.embyApiKey ||
+          legacyProxy302Settings.mediaServerToken ||
+          '',
+      },
       proxy302: {
         ...getDefaultProxy302Settings(),
         ...settings.proxy302,
@@ -238,6 +270,13 @@ export const settingsService: SettingsService = {
     }
 
     return putSettingsSection('proxy302', settings)
+  },
+  async saveEmbySettings(settings) {
+    if (import.meta.env.MODE === 'test') {
+      return settings
+    }
+
+    return putSettingsSection('emby', settings)
   },
   async saveWebhookSettings(settings) {
     const normalizedSettings = normalizeWebhookSettings(settings)

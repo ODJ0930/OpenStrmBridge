@@ -17,7 +17,12 @@ import {
 import type { ReactNode } from 'react'
 
 import { brandConfig, systemTabs } from '../../shared/config/appConfig'
-import type { Proxy302Settings, StrmSettings, WebhookSettings } from '../../shared/types/domain'
+import type {
+  EmbySettings,
+  Proxy302Settings,
+  StrmSettings,
+  WebhookSettings,
+} from '../../shared/types/domain'
 import type { AppIconName, SettingsTabKey } from '../../shared/types/ui'
 import { AppIcon } from '../../shared/ui/AppIcon'
 import { PagePanel } from '../../shared/ui/PagePanel'
@@ -56,6 +61,7 @@ function StrmSettingsTab() {
   const [form] = Form.useForm<StrmSettings>()
   const [saved, setSaved] = useState(false)
   const [loading, setLoading] = useState(false)
+  const [saving, setSaving] = useState(false)
   const initialSettings = settingsService.getStrmSettings()
   const watchedSettings = Form.useWatch([], form) as Partial<StrmSettings> | undefined
   const currentSettings: StrmSettings = {
@@ -95,14 +101,22 @@ function StrmSettingsTab() {
   }, [form, message])
 
   async function handleSave(values: StrmSettings) {
-    const savedSettings = await settingsService.saveStrmSettings({
-      ...values,
-      previewUrl,
-    })
+    setSaving(true)
 
-    form.setFieldsValue(savedSettings)
-    setSaved(true)
-    message.success('STRM 设置已保存')
+    try {
+      const savedSettings = await settingsService.saveStrmSettings({
+        ...values,
+        previewUrl,
+      })
+
+      form.setFieldsValue(savedSettings)
+      setSaved(true)
+      message.success('STRM 设置已保存')
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : 'STRM 设置保存失败')
+    } finally {
+      setSaving(false)
+    }
   }
 
   function refreshSignSecret() {
@@ -117,7 +131,7 @@ function StrmSettingsTab() {
       form={form}
       initialValues={initialSettings}
       layout="vertical"
-      disabled={loading}
+      disabled={loading || saving}
       onFinish={handleSave}
       onValuesChange={() => setSaved(false)}
     >
@@ -203,7 +217,7 @@ function StrmSettingsTab() {
 
       {saved ? <Alert message="STRM 设置已保存" showIcon type="success" /> : null}
       <div className="settings-save-row">
-        <Button htmlType="submit" type="primary">
+        <Button htmlType="submit" loading={saving} type="primary">
           保存设置
         </Button>
       </div>
@@ -249,6 +263,7 @@ function Proxy302SettingsTab() {
   const { message } = AntApp.useApp()
   const [form] = Form.useForm<Proxy302Settings>()
   const [loading, setLoading] = useState(false)
+  const [saving, setSaving] = useState(false)
   const initialSettings = settingsService.getProxy302Settings()
   const watchedSettings = Form.useWatch([], form) as Partial<Proxy302Settings> | undefined
   const currentSettings: Proxy302Settings = {
@@ -288,10 +303,18 @@ function Proxy302SettingsTab() {
   }, [form, message])
 
   async function handleSave(values: Proxy302Settings) {
-    const savedSettings = await settingsService.saveProxy302Settings(values)
+    setSaving(true)
 
-    form.setFieldsValue(savedSettings)
-    message.success('302代理设置已保存')
+    try {
+      const savedSettings = await settingsService.saveProxy302Settings(values)
+
+      form.setFieldsValue(savedSettings)
+      message.success('302代理设置已保存')
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '302代理设置保存失败')
+    } finally {
+      setSaving(false)
+    }
   }
 
   function openProxyUrl() {
@@ -305,7 +328,7 @@ function Proxy302SettingsTab() {
       form={form}
       initialValues={initialSettings}
       layout="vertical"
-      disabled={loading}
+      disabled={loading || saving}
       onFinish={handleSave}
     >
       <SettingsSectionTitle
@@ -340,7 +363,7 @@ function Proxy302SettingsTab() {
       <Form.Item
         extra="以此端口访问反代后的 Emby；保存后后端会按该端口启动或重启内置 go-emby2openlist。"
         label="服务端口"
-        rules={[{ required: true, message: '请输入服务端口' }]}
+        rules={currentSettings.enabled ? [{ required: true, message: '请输入服务端口' }] : []}
         name="servicePort"
       >
         <InputNumber max={65535} min={1} style={{ width: '100%' }} />
@@ -349,22 +372,17 @@ function Proxy302SettingsTab() {
         extra="填写真实 Emby 服务地址。源码部署运行在宿主机上，Docker 版 Emby 暴露端口后通常可用 http://127.0.0.1:8096。"
         label="Emby 服务地址"
         name="mediaServerUrl"
-        rules={[{ required: true, message: '请输入 Emby 服务地址' }]}
+        rules={currentSettings.enabled ? [{ required: true, message: '请输入 Emby 服务地址' }] : []}
       >
         <Input placeholder="http://127.0.0.1:8096" />
-      </Form.Item>
-      <Form.Item
-        extra="用于神医助手计划任务的立即执行和进度读取，可在 Emby 控制台的 API Keys 中创建。"
-        label="Emby API Key"
-        name="embyApiKey"
-      >
-        <Input.Password placeholder="请输入 Emby API Key" />
       </Form.Item>
       <Form.Item
         extra="Emby 媒体库里看到的 STRM 根目录，例如 Docker 容器内挂载路径 /media/strm。"
         label="Emby 媒体挂载路径"
         name="mountPath"
-        rules={[{ required: true, message: '请输入 Emby 媒体挂载路径' }]}
+        rules={
+          currentSettings.enabled ? [{ required: true, message: '请输入 Emby 媒体挂载路径' }] : []
+        }
       >
         <Input placeholder="/media/strm" />
       </Form.Item>
@@ -389,8 +407,87 @@ function Proxy302SettingsTab() {
         />
       ) : null}
       <div className="settings-save-row">
-        <Button htmlType="submit" type="primary">
+        <Button htmlType="submit" loading={saving} type="primary">
           保存设置
+        </Button>
+      </div>
+    </Form>
+  )
+}
+
+function EmbyAuthSettingsTab() {
+  const { message } = AntApp.useApp()
+  const [form] = Form.useForm<EmbySettings>()
+  const [loading, setLoading] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const initialSettings = settingsService.getEmbySettings()
+
+  useEffect(() => {
+    let mounted = true
+
+    async function loadSettings() {
+      setLoading(true)
+
+      try {
+        const settings = await settingsService.loadSettings()
+
+        if (mounted) {
+          form.setFieldsValue(settings.emby)
+        }
+      } catch (error) {
+        if (mounted) {
+          message.error(error instanceof Error ? error.message : '读取 Emby 授权失败')
+        }
+      } finally {
+        if (mounted) {
+          setLoading(false)
+        }
+      }
+    }
+
+    void loadSettings()
+
+    return () => {
+      mounted = false
+    }
+  }, [form, message])
+
+  async function handleSave(values: EmbySettings) {
+    setSaving(true)
+
+    try {
+      const savedSettings = await settingsService.saveEmbySettings(values)
+
+      form.setFieldsValue(savedSettings)
+      message.success('Emby 授权已保存')
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : 'Emby 授权保存失败')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <Form
+      disabled={loading || saving}
+      form={form}
+      initialValues={initialSettings}
+      layout="vertical"
+      onFinish={handleSave}
+    >
+      <SettingsSectionTitle icon="shield" title="Emby 授权" />
+      <Alert
+        description="用于神医助手计划任务的立即执行和进度读取。请在 Emby 控制台的 API Keys 中新建秘钥，然后填写到这里。"
+        message="填写 Emby API Key"
+        showIcon
+        type="info"
+      />
+      <Form.Item label="Emby API Key" name="apiKey">
+        <Input.Password placeholder="请输入从 Emby 获取的 API Key" />
+      </Form.Item>
+      <div className="settings-save-row">
+        <Button htmlType="submit" loading={saving} type="primary">
+          保存授权
         </Button>
       </div>
     </Form>
@@ -401,6 +498,7 @@ function WebhookSettingsTab() {
   const { message } = AntApp.useApp()
   const [form] = Form.useForm<WebhookSettings>()
   const [loading, setLoading] = useState(false)
+  const [saving, setSaving] = useState(false)
   const initialSettings = settingsService.getWebhookSettings()
 
   useEffect(() => {
@@ -447,10 +545,18 @@ function WebhookSettingsTab() {
   }
 
   async function handleSave(values: WebhookSettings) {
-    const savedSettings = await settingsService.saveWebhookSettings(values)
+    setSaving(true)
 
-    form.setFieldsValue(savedSettings)
-    message.success('Webhook 设置已保存')
+    try {
+      const savedSettings = await settingsService.saveWebhookSettings(values)
+
+      form.setFieldsValue(savedSettings)
+      message.success('Webhook 设置已保存')
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : 'Webhook 设置保存失败')
+    } finally {
+      setSaving(false)
+    }
   }
 
   return (
@@ -458,7 +564,7 @@ function WebhookSettingsTab() {
       form={form}
       initialValues={initialSettings}
       layout="vertical"
-      disabled={loading}
+      disabled={loading || saving}
       onFinish={handleSave}
     >
       <SettingsSectionTitle icon="webhook" title="Webhook 地址" />
@@ -513,7 +619,7 @@ function WebhookSettingsTab() {
       />
 
       <div className="settings-save-row">
-        <Button htmlType="submit" type="primary">
+        <Button htmlType="submit" loading={saving} type="primary">
           保存设置
         </Button>
       </div>
@@ -706,6 +812,8 @@ function renderTabContent(key: SettingsTabKey) {
       return <StrmSettingsTab />
     case 'proxy302':
       return <Proxy302SettingsTab />
+    case 'emby':
+      return <EmbyAuthSettingsTab />
     case 'webhook':
       return <WebhookSettingsTab />
     case 'account':
@@ -732,6 +840,13 @@ export function SystemSettingsPage() {
           title="302代理"
           tone="cyan"
           value="代理"
+        />
+        <StatCard
+          detail="API Key 与任务调用"
+          icon="shield"
+          title="Emby 授权"
+          tone="green"
+          value="授权"
         />
         <StatCard
           detail="删除同步与回调地址"

@@ -201,7 +201,6 @@ export interface StrmSettings {
 export interface Proxy302Settings {
   apiSecret?: string
   configPath?: string
-  embyApiKey?: string
   enabled: boolean
   engine?: 'go-emby2openlist'
   healthy: boolean
@@ -213,6 +212,10 @@ export interface Proxy302Settings {
   runtimeStatus?: 'running' | 'stopped' | 'failed' | string
   sourcePath?: string
   servicePort: number
+}
+
+export interface EmbySettings {
+  apiKey: string
 }
 
 export interface WebhookSettings {
