@@ -12,6 +12,30 @@ DEFAULT_HOST="${OPENSTRMBRIDGE_DEFAULT_HOST:-0.0.0.0}"
 MANAGER_BIN="/usr/local/bin/openstrmbridge"
 MANAGER_DOWNLOAD_URL="https://github.com/${REPO}/releases/latest/download/openstrmbridge-manager.sh"
 
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+	COLOR_RESET=$'\033[0m'
+	COLOR_BOLD=$'\033[1m'
+	COLOR_DIM=$'\033[2m'
+	COLOR_RED=$'\033[31m'
+	COLOR_GREEN=$'\033[32m'
+	COLOR_YELLOW=$'\033[33m'
+	COLOR_CYAN=$'\033[36m'
+else
+	COLOR_RESET=""
+	COLOR_BOLD=""
+	COLOR_DIM=""
+	COLOR_RED=""
+	COLOR_GREEN=""
+	COLOR_YELLOW=""
+	COLOR_CYAN=""
+fi
+
+paint() {
+	local color="$1"
+	local text="$2"
+	printf '%b%s%b' "$color" "$text" "$COLOR_RESET"
+}
+
 info() {
 	printf '[%s] %s\n' "$APP_NAME" "$*"
 }
@@ -30,15 +54,21 @@ read_prompt() {
 	local prompt="$2"
 	local value
 
-	if [ -r /dev/tty ]; then
-		if ! read -r -p "$prompt" value </dev/tty; then
-			die "无法从终端读取输入。"
+	if { exec 3</dev/tty; } 2>/dev/null; then
+		if read -r -p "$prompt" value <&3; then
+			exec 3<&-
+			value="${value%$'\r'}"
+			printf -v "$variable_name" '%s' "$value"
+			return
 		fi
-	else
-		if ! read -r -p "$prompt" value; then
-			die "无法读取输入。"
-		fi
+
+		exec 3<&-
 	fi
+
+	if ! read -r -p "$prompt" value; then
+		die "无法读取输入。"
+	fi
+	value="${value%$'\r'}"
 
 	printf -v "$variable_name" '%s' "$value"
 }
@@ -48,19 +78,25 @@ read_secret_prompt() {
 	local prompt="$2"
 	local value
 
-	if [ -r /dev/tty ]; then
-		if ! read -r -s -p "$prompt" value </dev/tty; then
-			printf '\n' >/dev/tty
-			die "无法从终端读取输入。"
-		fi
-		printf '\n' >/dev/tty
-	else
-		if ! read -r -s -p "$prompt" value; then
+	if { exec 3</dev/tty; } 2>/dev/null; then
+		if read -r -s -p "$prompt" value <&3; then
+			exec 3<&-
+			value="${value%$'\r'}"
 			printf '\n'
-			die "无法读取输入。"
+			printf -v "$variable_name" '%s' "$value"
+			return
 		fi
+
+		exec 3<&-
 		printf '\n'
 	fi
+
+	if ! read -r -s -p "$prompt" value; then
+		printf '\n'
+		die "无法读取输入。"
+	fi
+	printf '\n'
+	value="${value%$'\r'}"
 
 	printf -v "$variable_name" '%s' "$value"
 }
@@ -168,15 +204,16 @@ set_env_value() {
 }
 
 ensure_env_file() {
-	local port
+	local port public_host
 	port="$(read_env_value OPENSTRMBRIDGE_BACKEND_PORT "$DEFAULT_PORT")"
+	public_host="$(format_url_host "$(detect_access_host "$DEFAULT_HOST")")"
 
 	set_env_value OPENSTRMBRIDGE_BACKEND_HOST "$DEFAULT_HOST"
 	set_env_value OPENSTRMBRIDGE_BACKEND_PORT "$port"
 	set_env_value OPENSTRMBRIDGE_DATA_DIR "$INSTALL_DIR/data"
 	set_env_value OPENSTRMBRIDGE_WEB_DIR "$INSTALL_DIR/dist"
 	set_env_value OPENSTRMBRIDGE_GE2O_BINARY "$INSTALL_DIR/resources/bin/ge2o"
-	set_env_value OPENSTRMBRIDGE_BACKEND_PUBLIC_URL "http://${DEFAULT_HOST}:${port}"
+	set_env_value OPENSTRMBRIDGE_BACKEND_PUBLIC_URL "http://${public_host}:${port}"
 	set_env_value OPENSTRMBRIDGE_STRM_DIR "$INSTALL_DIR/strm"
 }
 
@@ -260,44 +297,113 @@ get_service_enabled_state() {
 	systemctl is-enabled "$SERVICE_NAME" 2>/dev/null || true
 }
 
+detect_primary_ip() {
+	local ip_addr
+
+	if command -v ip >/dev/null 2>&1; then
+		ip_addr="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{ for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit } }' || true)"
+
+		if [ -n "$ip_addr" ]; then
+			printf '%s' "$ip_addr"
+			return
+		fi
+	fi
+
+	if command -v hostname >/dev/null 2>&1; then
+		ip_addr="$(hostname -I 2>/dev/null | awk 'NF { print $1; exit }' || true)"
+
+		if [ -n "$ip_addr" ]; then
+			printf '%s' "$ip_addr"
+			return
+		fi
+	fi
+
+	printf '127.0.0.1'
+}
+
+detect_access_host() {
+	local bind_host="$1"
+
+	case "$bind_host" in
+	0.0.0.0 | "::" | "[::]" | "")
+		detect_primary_ip
+		;;
+	*)
+		printf '%s' "$bind_host"
+		;;
+	esac
+}
+
+format_url_host() {
+	local host="$1"
+
+	case "$host" in
+	*:*)
+		case "$host" in
+		"["*"]") printf '%s' "$host" ;;
+		*) printf '[%s]' "$host" ;;
+		esac
+		;;
+	*) printf '%s' "$host" ;;
+	esac
+}
+
 print_program_status() {
-	local installed_label service_file_label active_state active_label enabled_state host port access_url
+	local installed_label service_file_label active_state active_label enabled_state enabled_label bind_host port access_host url_host listen_label access_label
 
 	if is_installed; then
-		installed_label="已安装"
+		installed_label="$(paint "$COLOR_GREEN" "已安装")"
 	else
-		installed_label="未安装"
+		installed_label="$(paint "$COLOR_YELLOW" "未安装")"
 	fi
 
 	if service_file_exists; then
-		service_file_label="已创建"
+		service_file_label="$(paint "$COLOR_GREEN" "已创建")"
 	else
-		service_file_label="未创建"
+		service_file_label="$(paint "$COLOR_YELLOW" "未创建")"
 	fi
 
 	active_state="$(get_service_active_state)"
 
 	case "$active_state" in
-	active) active_label="已启动" ;;
-	inactive | failed | deactivating | unknown | "") active_label="已停止" ;;
-	*) active_label="$active_state" ;;
+	active) active_label="$(paint "$COLOR_GREEN" "已启动")" ;;
+	failed) active_label="$(paint "$COLOR_RED" "异常停止")" ;;
+	inactive | deactivating | unknown | "") active_label="$(paint "$COLOR_RED" "已停止")" ;;
+	*) active_label="$(paint "$COLOR_YELLOW" "$active_state")" ;;
 	esac
 
 	enabled_state="$(get_service_enabled_state)"
-	host="$(read_env_value OPENSTRMBRIDGE_BACKEND_HOST "$DEFAULT_HOST")"
-	port="$(read_env_value OPENSTRMBRIDGE_BACKEND_PORT "$DEFAULT_PORT")"
-	access_url="http://${host}:${port}"
+	case "$enabled_state" in
+	enabled) enabled_label="$(paint "$COLOR_GREEN" "已启用")" ;;
+	disabled) enabled_label="$(paint "$COLOR_YELLOW" "未启用")" ;;
+	unknown | "") enabled_label="$(paint "$COLOR_YELLOW" "未配置")" ;;
+	*) enabled_label="$(paint "$COLOR_YELLOW" "$enabled_state")" ;;
+	esac
+
+	bind_host="$(read_env_value OPENSTRMBRIDGE_BACKEND_HOST "")"
+	port="$(read_env_value OPENSTRMBRIDGE_BACKEND_PORT "")"
+
+	if [ -n "$bind_host" ] && [ -n "$port" ]; then
+		access_host="$(detect_access_host "$bind_host")"
+		url_host="$(format_url_host "$access_host")"
+		listen_label="${bind_host}:${port}"
+		access_label="$(paint "$COLOR_CYAN" "http://${url_host}:${port}")"
+	else
+		listen_label="$(paint "$COLOR_YELLOW" "未配置")"
+		access_label="$(paint "$COLOR_YELLOW" "未配置")"
+	fi
 
 	cat <<STATUS
 
-${APP_NAME} 状态
+$(paint "$COLOR_BOLD" "${APP_NAME} 状态")
 安装状态：${installed_label}
 服务文件：${service_file_label}
 运行状态：${active_label}
-开机启动：${enabled_state}
+开机启动：${enabled_label}
+监听地址：${listen_label}
 安装目录：${INSTALL_DIR}
 配置文件：${ENV_FILE}
-访问地址：${access_url}
+访问地址：${access_label}
 
 STATUS
 }
@@ -410,12 +516,13 @@ validate_port() {
 }
 
 set_port() {
-	local port="$1"
+	local port="$1" public_host
 	validate_port "$port" || die "端口无效：${port}"
+	public_host="$(format_url_host "$(detect_access_host "$DEFAULT_HOST")")"
 
 	set_env_value OPENSTRMBRIDGE_BACKEND_HOST "$DEFAULT_HOST"
 	set_env_value OPENSTRMBRIDGE_BACKEND_PORT "$port"
-	set_env_value OPENSTRMBRIDGE_BACKEND_PUBLIC_URL "http://${DEFAULT_HOST}:${port}"
+	set_env_value OPENSTRMBRIDGE_BACKEND_PUBLIC_URL "http://${public_host}:${port}"
 	systemctl daemon-reload
 }
 
@@ -600,15 +707,15 @@ delete_app() {
 print_menu() {
 	cat <<MENU
 
-${APP_NAME} 管理脚本
-1. 安装 / 重装
-2. 启动服务
-3. 关闭服务
-4. 更新程序
-5. 更换端口
-6. 重置账号密码
-7. 删除程序
-0. 退出
+$(paint "$COLOR_BOLD" "${APP_NAME} 管理脚本")
+$(paint "$COLOR_CYAN" "1.") 安装 / 重装
+$(paint "$COLOR_GREEN" "2.") 启动服务
+$(paint "$COLOR_YELLOW" "3.") 关闭服务
+$(paint "$COLOR_CYAN" "4.") 更新程序
+$(paint "$COLOR_CYAN" "5.") 更换端口
+$(paint "$COLOR_CYAN" "6.") 重置账号密码
+$(paint "$COLOR_RED" "7.") 删除程序
+$(paint "$COLOR_DIM" "0.") 退出
 
 MENU
 }
