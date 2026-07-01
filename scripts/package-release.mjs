@@ -15,6 +15,7 @@ const cacheRoot = path.join(rootDir, '.release-cache')
 
 const targets = {
   'win-x64': {
+    artifactName: `openstrmbridge-v${packageJson.version}-windows-x64.zip`,
     goArch: 'amd64',
     goOs: 'windows',
     ge2oName: 'ge2o.exe',
@@ -23,6 +24,7 @@ const targets = {
     startCommand: 'start.cmd',
   },
   'linux-x64': {
+    artifactName: `openstrmbridge-v${packageJson.version}-debian-x64.tar.gz`,
     goArch: 'amd64',
     goOs: 'linux',
     ge2oName: 'ge2o',
@@ -31,6 +33,7 @@ const targets = {
     startCommand: 'start.sh',
   },
   'linux-arm64': {
+    artifactName: `openstrmbridge-v${packageJson.version}-debian-arm64.tar.gz`,
     goArch: 'arm64',
     goOs: 'linux',
     ge2oName: 'ge2o',
@@ -39,6 +42,7 @@ const targets = {
     startCommand: 'start.sh',
   },
   'macos-x64': {
+    artifactName: `openstrmbridge-v${packageJson.version}-macos-x64.tar.gz`,
     goArch: 'amd64',
     goOs: 'darwin',
     ge2oName: 'ge2o',
@@ -47,6 +51,7 @@ const targets = {
     startCommand: 'start.sh',
   },
   'macos-arm64': {
+    artifactName: `openstrmbridge-v${packageJson.version}-macos-arm64.tar.gz`,
     goArch: 'arm64',
     goOs: 'darwin',
     ge2oName: 'ge2o',
@@ -332,6 +337,48 @@ async function packageTarget(targetName) {
   await writePortableReadme(releaseDir, targetName)
 }
 
+function quotePowerShellPath(filePath) {
+  return `'${filePath.replaceAll("'", "''")}'`
+}
+
+async function archiveTarget(targetName) {
+  const target = targets[targetName]
+  const releaseDirName = `openstrmbridge-${targetName}`
+  const artifactDir = path.join(releaseRoot, 'artifacts')
+  const artifactFile = path.join(artifactDir, target.artifactName)
+
+  await mkdir(artifactDir, { recursive: true })
+  await rm(artifactFile, { force: true })
+
+  if (target.artifactName.endsWith('.zip')) {
+    if (process.platform === 'win32') {
+      const sourcePattern = path.join(releaseRoot, releaseDirName, '*')
+
+      await run('powershell', [
+        '-NoProfile',
+        '-Command',
+        `Compress-Archive -Path ${quotePowerShellPath(sourcePattern)} -DestinationPath ${quotePowerShellPath(artifactFile)} -Force`,
+      ])
+    } else {
+      await run('zip', ['-qr', artifactFile, releaseDirName], { cwd: releaseRoot })
+    }
+
+    return
+  }
+
+  await run('tar', ['-czf', artifactFile, '-C', releaseRoot, releaseDirName])
+}
+
+async function copyManagerScript() {
+  const artifactDir = path.join(releaseRoot, 'artifacts')
+
+  await mkdir(artifactDir, { recursive: true })
+  await copyFile(
+    path.join(rootDir, 'scripts', 'openstrmbridge-manager.sh'),
+    path.join(artifactDir, 'openstrmbridge-manager.sh'),
+  )
+}
+
 const requestedTargets = getRequestedTargets()
 
 await buildFrontend()
@@ -339,6 +386,9 @@ await mkdir(releaseRoot, { recursive: true })
 
 for (const targetName of requestedTargets) {
   await packageTarget(targetName)
+  await archiveTarget(targetName)
 }
+
+await copyManagerScript()
 
 console.log(`Done. Release output: ${releaseRoot}`)
