@@ -842,13 +842,6 @@ export function SystemSettingsPage() {
           value="代理"
         />
         <StatCard
-          detail="API Key 与任务调用"
-          icon="shield"
-          title="Emby 授权"
-          tone="green"
-          value="授权"
-        />
-        <StatCard
           detail="删除同步与回调地址"
           icon="bot"
           title="Webhook"
