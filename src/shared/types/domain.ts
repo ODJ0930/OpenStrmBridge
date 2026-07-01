@@ -62,7 +62,6 @@ export interface StorageItem {
     token?: string
   }
   alist115?: {
-    enabled: boolean
     endpoint?: string
     token?: string
   }

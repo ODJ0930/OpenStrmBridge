@@ -2692,11 +2692,8 @@ function getUnencodedRemotePath(remotePath) {
   return normalizeRemotePath(remotePath).split('/').filter(Boolean).join('/').replace(/^/, '/')
 }
 
-function isAList115SignEnabled(storage) {
-  return (
-    storage?.alist115?.enabled === true &&
-    (storage.accessMethod === 'openlist' || storage.accessMethod === 'webdav')
-  )
+function shouldAppendAListSign(storage) {
+  return storage?.accessMethod === 'openlist' || storage?.accessMethod === 'webdav'
 }
 
 function inferAListEndpointFromWebDav(endpoint) {
@@ -2728,6 +2725,70 @@ function getAList115Endpoint(storage) {
 
 function getAList115Token(storage) {
   return String(storage.alist115?.token || storage.openlist?.token || '').trim()
+}
+
+async function loginAListWithCredentials(endpoint, username, password, context = {}) {
+  if (
+    context.alist115LoginEndpoint === endpoint &&
+    context.alist115LoginUsername === username &&
+    context.alist115Token
+  ) {
+    return context.alist115Token
+  }
+
+  const auth = await requestOpenListApi(endpoint, '/api/auth/login', '', {
+    body: JSON.stringify({
+      username,
+      password,
+    }),
+    headers: {
+      'Client-Id': 'openstrmbridge-webdav-sign',
+    },
+    method: 'POST',
+  })
+  const token = String(auth?.token ?? '').trim()
+
+  if (!token) {
+    throw new Error('AList 登录未返回 token')
+  }
+
+  context.alist115LoginEndpoint = endpoint
+  context.alist115LoginUsername = username
+  context.alist115Token = token
+
+  return token
+}
+
+async function resolveAListSignToken(storage, endpoint, context = {}) {
+  if (storage.accessMethod === 'webdav') {
+    const username = String(storage.webdav?.username ?? '').trim()
+    const password = String(storage.webdav?.password ?? '').trim()
+
+    if (!username || !password) {
+      throw new Error('AList sign 缺少 WebDAV 用户名或密码')
+    }
+
+    try {
+      return await loginAListWithCredentials(endpoint, username, password, context)
+    } catch (error) {
+      const fallbackToken = getAList115Token(storage)
+
+      if (fallbackToken) {
+        context.alist115Token = fallbackToken
+        return fallbackToken
+      }
+
+      throw new Error(`AList sign 使用 WebDAV 账号登录失败: ${getErrorMessage(error)}`)
+    }
+  }
+
+  const token = context.alist115Token || getAList115Token(storage)
+
+  if (token) {
+    context.alist115Token = token
+  }
+
+  return token
 }
 
 function getWebDavAListPrefix(storage) {
@@ -2778,15 +2839,15 @@ function appendSignToUrl(rawUrl, sign) {
 
 async function getAList115Sign(storage, entryPath, context = {}) {
   const endpoint = context.alist115Endpoint || getAList115Endpoint(storage)
-  const token = context.alist115Token || getAList115Token(storage)
+  const token = await resolveAListSignToken(storage, endpoint, context)
   const apiPath = getAList115ApiPath(storage, entryPath)
 
   if (!endpoint) {
-    throw new Error('115 签名缺少 AList 管理地址')
+    throw new Error('AList sign 缺少 AList 管理地址')
   }
 
   if (!token) {
-    throw new Error('115 签名缺少可调用 /api/fs/get 的 AList Token')
+    throw new Error('AList sign 缺少可调用 /api/fs/get 的 AList Token')
   }
 
   context.alist115Endpoint = endpoint
@@ -2809,7 +2870,7 @@ async function getAList115Sign(storage, entryPath, context = {}) {
 }
 
 async function createStrmUrl(storage, entryPath, context = {}) {
-  if (isAList115SignEnabled(storage)) {
+  if (shouldAppendAListSign(storage)) {
     return appendSignToUrl(
       createAListDownloadUrl(storage, entryPath),
       await getAList115Sign(storage, entryPath, context),
@@ -2892,7 +2953,7 @@ async function executeTask(task, storage, strmSettings, settings = {}) {
     `目录时间检查: ${task.directoryTimeCheck ? 'true' : 'false'}`,
     `增量生成模式: ${task.incremental ? 'true' : 'false'}`,
     `预先刷新 OpenList 缓存: ${task.preRefreshOpenListCache ? 'true' : 'false'}`,
-    `115 签名: ${isAList115SignEnabled(storage) ? 'true' : 'false'}`,
+    `AList sign: ${shouldAppendAListSign(storage) ? 'true' : 'false'}`,
     `媒体后缀: ${strmSettings.mediaExtensions}`,
     `媒体大小阈值: ${strmSettings.minMediaSizeMb} MB`,
     '------------------------------------------------------------',
