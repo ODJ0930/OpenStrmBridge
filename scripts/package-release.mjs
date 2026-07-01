@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process'
 import { createWriteStream } from 'node:fs'
-import { chmod, copyFile, cp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, copyFile, cp, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { get as httpsGet } from 'node:https'
 import { platform } from 'node:os'
 import path from 'node:path'
 import { pipeline } from 'node:stream/promises'
@@ -25,7 +26,7 @@ const targets = {
     goArch: 'amd64',
     goOs: 'linux',
     ge2oName: 'ge2o',
-    nodeArchive: 'tar.xz',
+    nodeArchive: 'tar.gz',
     nodeName: `node-${nodeVersion}-linux-x64`,
     startCommand: 'start.sh',
   },
@@ -33,7 +34,7 @@ const targets = {
     goArch: 'arm64',
     goOs: 'linux',
     ge2oName: 'ge2o',
-    nodeArchive: 'tar.xz',
+    nodeArchive: 'tar.gz',
     nodeName: `node-${nodeVersion}-linux-arm64`,
     startCommand: 'start.sh',
   },
@@ -133,20 +134,77 @@ async function pathExists(filePath) {
   }
 }
 
+function downloadWithHttps(url, outputFile, redirectCount = 0) {
+  return new Promise((resolve, reject) => {
+    const request = httpsGet(url, (response) => {
+      const statusCode = response.statusCode ?? 0
+
+      if (statusCode >= 300 && statusCode < 400 && response.headers.location) {
+        response.resume()
+
+        if (redirectCount > 5) {
+          reject(new Error(`下载重定向次数过多：${url}`))
+          return
+        }
+
+        resolve(
+          downloadWithHttps(
+            new URL(response.headers.location, url).toString(),
+            outputFile,
+            redirectCount + 1,
+          ),
+        )
+        return
+      }
+
+      if (statusCode !== 200) {
+        response.resume()
+        reject(new Error(`下载 Node 运行时失败：HTTP ${statusCode}`))
+        return
+      }
+
+      pipeline(response, createWriteStream(outputFile)).then(resolve, reject)
+    })
+
+    request.setTimeout(120_000, () => {
+      request.destroy(new Error(`下载超时：${url}`))
+    })
+    request.once('error', reject)
+  })
+}
+
 async function downloadFile(url, outputFile) {
   if (await pathExists(outputFile)) {
-    return
+    const { size } = await stat(outputFile)
+
+    if (size > 0) {
+      return
+    }
+
+    await rm(outputFile, { force: true })
   }
 
   await mkdir(path.dirname(outputFile), { recursive: true })
   console.log(`Downloading ${url}`)
-  const response = await fetch(url)
 
-  if (!response.ok || !response.body) {
-    throw new Error(`下载 Node 运行时失败：HTTP ${response.status}`)
+  const tempFile = `${outputFile}.tmp`
+
+  await rm(tempFile, { force: true })
+
+  try {
+    await downloadWithHttps(url, tempFile)
+
+    const { size } = await stat(tempFile)
+
+    if (size === 0) {
+      throw new Error(`下载文件为空：${url}`)
+    }
+
+    await rename(tempFile, outputFile)
+  } catch (error) {
+    await rm(tempFile, { force: true })
+    throw error
   }
-
-  await pipeline(response.body, createWriteStream(outputFile))
 }
 
 async function ensureNodeRuntime(target) {
@@ -162,7 +220,18 @@ async function ensureNodeRuntime(target) {
 
   await downloadFile(archiveUrl, archiveFile)
   await mkdir(path.dirname(nodeDir), { recursive: true })
-  await run('tar', ['-xf', archiveFile, '-C', path.dirname(nodeDir)])
+
+  const extractArgs = ['-xf', archiveFile, '-C', path.dirname(nodeDir)]
+
+  if (target.goOs !== 'windows') {
+    extractArgs.push(
+      `--exclude=${target.nodeName}/bin/corepack`,
+      `--exclude=${target.nodeName}/bin/npm`,
+      `--exclude=${target.nodeName}/bin/npx`,
+    )
+  }
+
+  await run('tar', extractArgs)
 
   return nodeDir
 }
