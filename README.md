@@ -78,6 +78,8 @@ wget -qO- https://raw.githubusercontent.com/ODJ0930/OpenStrmBridge/main/scripts/
 
 安装流程会要求设置账号名称和密码，并在账号配置写入后询问是否调整默认端口。
 
+一键脚本安装的服务默认监听 `0.0.0.0`。
+
 ### 前置依赖
 
 - Node.js 20+

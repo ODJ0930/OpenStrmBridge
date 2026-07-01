@@ -130,12 +130,12 @@ ensure_env_file() {
 	local port
 	port="$(read_env_value OPENSTRMBRIDGE_BACKEND_PORT "$DEFAULT_PORT")"
 
-	set_env_value OPENSTRMBRIDGE_BACKEND_HOST "$(read_env_value OPENSTRMBRIDGE_BACKEND_HOST "$DEFAULT_HOST")"
+	set_env_value OPENSTRMBRIDGE_BACKEND_HOST "$DEFAULT_HOST"
 	set_env_value OPENSTRMBRIDGE_BACKEND_PORT "$port"
 	set_env_value OPENSTRMBRIDGE_DATA_DIR "$INSTALL_DIR/data"
 	set_env_value OPENSTRMBRIDGE_WEB_DIR "$INSTALL_DIR/dist"
 	set_env_value OPENSTRMBRIDGE_GE2O_BINARY "$INSTALL_DIR/resources/bin/ge2o"
-	set_env_value OPENSTRMBRIDGE_BACKEND_PUBLIC_URL "http://127.0.0.1:${port}"
+	set_env_value OPENSTRMBRIDGE_BACKEND_PUBLIC_URL "http://${DEFAULT_HOST}:${port}"
 	set_env_value OPENSTRMBRIDGE_STRM_DIR "$INSTALL_DIR/strm"
 }
 
@@ -262,8 +262,9 @@ set_port() {
 	local port="$1"
 	validate_port "$port" || die "端口无效：${port}"
 
+	set_env_value OPENSTRMBRIDGE_BACKEND_HOST "$DEFAULT_HOST"
 	set_env_value OPENSTRMBRIDGE_BACKEND_PORT "$port"
-	set_env_value OPENSTRMBRIDGE_BACKEND_PUBLIC_URL "http://127.0.0.1:${port}"
+	set_env_value OPENSTRMBRIDGE_BACKEND_PUBLIC_URL "http://${DEFAULT_HOST}:${port}"
 	systemctl daemon-reload
 }
 
