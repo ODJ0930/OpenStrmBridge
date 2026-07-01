@@ -2765,7 +2765,7 @@ async function resolveAListSignToken(storage, endpoint, context = {}) {
     const password = String(storage.webdav?.password ?? '').trim()
 
     if (!username || !password) {
-      throw new Error('AList sign 缺少 WebDAV 用户名或密码')
+      throw new Error('直链签名缺少 WebDAV 用户名或密码')
     }
 
     try {
@@ -2778,7 +2778,7 @@ async function resolveAListSignToken(storage, endpoint, context = {}) {
         return fallbackToken
       }
 
-      throw new Error(`AList sign 使用 WebDAV 账号登录失败: ${getErrorMessage(error)}`)
+      throw new Error(`直链签名使用 WebDAV 账号登录失败: ${getErrorMessage(error)}`)
     }
   }
 
@@ -2843,11 +2843,11 @@ async function getAList115Sign(storage, entryPath, context = {}) {
   const apiPath = getAList115ApiPath(storage, entryPath)
 
   if (!endpoint) {
-    throw new Error('AList sign 缺少 AList 管理地址')
+    throw new Error('直链签名缺少服务地址')
   }
 
   if (!token) {
-    throw new Error('AList sign 缺少可调用 /api/fs/get 的 AList Token')
+    throw new Error('直链签名缺少可调用 /api/fs/get 的访问凭据')
   }
 
   context.alist115Endpoint = endpoint
@@ -2953,7 +2953,7 @@ async function executeTask(task, storage, strmSettings, settings = {}) {
     `目录时间检查: ${task.directoryTimeCheck ? 'true' : 'false'}`,
     `增量生成模式: ${task.incremental ? 'true' : 'false'}`,
     `预先刷新 OpenList 缓存: ${task.preRefreshOpenListCache ? 'true' : 'false'}`,
-    `AList sign: ${shouldAppendAListSign(storage) ? 'true' : 'false'}`,
+    `直链签名: ${shouldAppendAListSign(storage) ? 'true' : 'false'}`,
     `媒体后缀: ${strmSettings.mediaExtensions}`,
     `媒体大小阈值: ${strmSettings.minMediaSizeMb} MB`,
     '------------------------------------------------------------',

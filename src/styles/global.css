@@ -889,20 +889,6 @@ a {
   margin-top: 2px;
 }
 
-.storage-sign-section {
-  display: grid;
-  gap: 12px;
-  margin-top: 4px;
-  padding: 14px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: #fbfdff;
-}
-
-.storage-sign-section .ant-form-item {
-  margin-bottom: 0;
-}
-
 .connection-result-section {
   display: grid;
   gap: 10px;

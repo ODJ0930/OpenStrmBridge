@@ -40,8 +40,6 @@ interface StorageFormValues {
   basePath?: string
   strmBaseUrl?: string
   enableUrlEncoding?: boolean
-  alist115Endpoint?: string
-  alist115Token?: string
 }
 
 interface TokenCheckFormValues {
@@ -149,8 +147,6 @@ function storageToFormValues(storage: StorageItem): StorageFormValues {
     basePath: storage.openlist?.basePath ?? storage.rootPath,
     strmBaseUrl: storage.openlist?.strmBaseUrl,
     enableUrlEncoding: storage.openlist?.enableUrlEncoding ?? true,
-    alist115Endpoint: storage.alist115?.endpoint,
-    alist115Token: storage.alist115?.token,
   }
 }
 
@@ -165,9 +161,9 @@ function formValuesToStorage(
     accessMethod === 'openlist' ? token || existingStorage?.openlist?.token : undefined
   const nextWebDavPassword =
     accessMethod === 'webdav' ? password || existingStorage?.webdav?.password : undefined
-  const alist115Token =
-    accessMethod === 'openlist'
-      ? values.alist115Token?.trim() || existingStorage?.alist115?.token || undefined
+  const existingAListSignConfig =
+    existingStorage?.alist115?.endpoint || existingStorage?.alist115?.token
+      ? existingStorage.alist115
       : undefined
   const endpoint = accessMethod === 'local' ? values.rootPath.trim() : values.endpoint.trim()
   const rootPath =
@@ -189,10 +185,10 @@ function formValuesToStorage(
     credentialLabel:
       accessMethod === 'openlist'
         ? nextOpenListToken
-          ? 'Token 已配置 / AList sign'
+          ? 'Token 已配置'
           : undefined
         : nextWebDavPassword
-          ? '账号密码 / AList sign'
+          ? '账号密码'
           : undefined,
     openlist:
       accessMethod === 'openlist'
@@ -213,10 +209,7 @@ function formValuesToStorage(
         : undefined,
     alist115:
       accessMethod === 'openlist' || accessMethod === 'webdav'
-        ? {
-            endpoint: values.alist115Endpoint?.trim() || undefined,
-            token: alist115Token,
-          }
+        ? existingAListSignConfig
         : undefined,
     local:
       accessMethod === 'local'
@@ -484,18 +477,6 @@ export function StorageManagementPage() {
   }
 
   async function handleSaveStorage(values: StorageFormValues) {
-    if (values.accessMethod === 'openlist') {
-      const hasReusableOpenListToken = Boolean(
-        values.token?.trim() || editingStorage?.openlist?.token,
-      )
-      const hasAListToken = Boolean(values.alist115Token?.trim() || editingStorage?.alist115?.token)
-
-      if (!hasReusableOpenListToken && !hasAListToken) {
-        message.error('生成 STRM 时会默认追加 AList sign，请填写可调用 /api/fs/get 的 AList Token')
-        return
-      }
-    }
-
     const savedStorage = formValuesToStorage(values, editingStorage)
 
     try {
@@ -545,9 +526,6 @@ export function StorageManagementPage() {
         <div className="storage-address-cell">
           <span>{getStorageAddress(storage)}</span>
           {storage.credentialLabel ? <Tag>{storage.credentialLabel}</Tag> : null}
-          {storage.accessMethod === 'openlist' || storage.accessMethod === 'webdav' ? (
-            <Tag color="cyan">AList sign</Tag>
-          ) : null}
           {storage.badge ? <Tag>{storage.badge}</Tag> : null}
           {typeof storage.usagePercent === 'number' ? (
             <div className="quota-bar">
@@ -749,37 +727,6 @@ export function StorageManagementPage() {
                 <Input.Password placeholder="WebDAV 密码" />
               </Form.Item>
             </>
-          ) : null}
-
-          {accessMethod === 'openlist' || accessMethod === 'webdav' ? (
-            <section className="storage-sign-section">
-              <Alert
-                description="生成 STRM 时会调用 AList /api/fs/get 获取文件 sign，并追加到 /d 直链后。OpenList / Alist 会优先复用上方 Token，WebDAV 会使用上方用户名和密码登录 AList 获取 token。"
-                message="AList sign 默认启用"
-                showIcon
-                type="info"
-              />
-              <Form.Item
-                extra={
-                  accessMethod === 'openlist'
-                    ? '留空则使用上方 OpenList / Alist 服务地址。'
-                    : 'WebDAV 一般会自动从 /dav 地址推断；推断不准时请填写 AList 管理地址，例如 http://host:5244。'
-                }
-                label="AList 管理地址"
-                name="alist115Endpoint"
-              >
-                <Input placeholder="http://47.86.231.104:5244" />
-              </Form.Item>
-              {accessMethod === 'openlist' ? (
-                <Form.Item
-                  extra="可选；留空时复用上方 OpenList / Alist Token。"
-                  label="AList Token"
-                  name="alist115Token"
-                >
-                  <Input.Password placeholder="alist-..." />
-                </Form.Item>
-              ) : null}
-            </section>
           ) : null}
         </Form>
       </Modal>
