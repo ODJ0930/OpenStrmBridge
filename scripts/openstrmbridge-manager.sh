@@ -24,6 +24,46 @@ die() {
 	exit 1
 }
 
+read_prompt() {
+	local variable_name="$1"
+	local prompt="$2"
+	local value
+
+	if [ -r /dev/tty ]; then
+		if ! read -r -p "$prompt" value </dev/tty; then
+			die "无法从终端读取输入。"
+		fi
+	else
+		if ! read -r -p "$prompt" value; then
+			die "无法读取输入。"
+		fi
+	fi
+
+	printf -v "$variable_name" '%s' "$value"
+}
+
+read_secret_prompt() {
+	local variable_name="$1"
+	local prompt="$2"
+	local value
+
+	if [ -r /dev/tty ]; then
+		if ! read -r -s -p "$prompt" value </dev/tty; then
+			printf '\n' >/dev/tty
+			die "无法从终端读取输入。"
+		fi
+		printf '\n' >/dev/tty
+	else
+		if ! read -r -s -p "$prompt" value; then
+			printf '\n'
+			die "无法读取输入。"
+		fi
+		printf '\n'
+	fi
+
+	printf -v "$variable_name" '%s' "$value"
+}
+
 require_root() {
 	if [ "${EUID:-$(id -u)}" -ne 0 ]; then
 		die "请使用 root 权限执行此脚本。"
@@ -273,7 +313,7 @@ change_port_interactive() {
 	current_port="$(read_env_value OPENSTRMBRIDGE_BACKEND_PORT "$DEFAULT_PORT")"
 
 	while true; do
-		read -r -p "请输入新的服务端口 [当前 ${current_port}]: " port
+		read_prompt port "请输入新的服务端口 [当前 ${current_port}]: "
 		port="${port:-$current_port}"
 
 		if validate_port "$port"; then
@@ -292,7 +332,7 @@ prompt_credentials() {
 	local username password password_confirm
 
 	while true; do
-		read -r -p "请输入账号名称: " username
+		read_prompt username "请输入账号名称: "
 		username="${username#"${username%%[![:space:]]*}"}"
 		username="${username%"${username##*[![:space:]]}"}"
 
@@ -304,10 +344,8 @@ prompt_credentials() {
 	done
 
 	while true; do
-		read -r -s -p "请输入账号密码: " password
-		printf '\n'
-		read -r -s -p "请再次输入账号密码: " password_confirm
-		printf '\n'
+		read_secret_prompt password "请输入账号密码: "
+		read_secret_prompt password_confirm "请再次输入账号密码: "
 
 		if [ -z "$password" ]; then
 			warn "账号密码不能为空。"
@@ -369,7 +407,7 @@ reset_account_password() {
 
 prompt_optional_port_change() {
 	local answer
-	read -r -p "是否更换默认端口 ${DEFAULT_PORT}？[y/N]: " answer
+	read_prompt answer "是否更换默认端口 ${DEFAULT_PORT}？[y/N]: "
 
 	case "$answer" in
 	y | Y | yes | YES) change_port_interactive ;;
@@ -434,7 +472,7 @@ MENU
 main_menu() {
 	local choice
 	print_menu
-	read -r -p "请选择功能: " choice
+	read_prompt choice "请选择功能: "
 
 	case "$choice" in
 	1) install_app ;;
