@@ -267,7 +267,7 @@ async function writeLaunchers(releaseDir, target) {
   if (isWindows) {
     await writeFile(
       path.join(releaseDir, 'start.cmd'),
-      `@echo off\r\nsetlocal\r\nset "APP_DIR=%~dp0"\r\nset "OPENSTRMBRIDGE_DATA_DIR=%APP_DIR%data"\r\nset "OPENSTRMBRIDGE_WEB_DIR=%APP_DIR%dist"\r\nset "OPENSTRMBRIDGE_GE2O_BINARY=%APP_DIR%resources\\bin\\ge2o.exe"\r\nset "OPENSTRMBRIDGE_BACKEND_PUBLIC_URL=http://127.0.0.1:5174"\r\n"%APP_DIR%runtime\\node\\node.exe" "%APP_DIR%server\\storage-check-server.mjs"\r\n`,
+      `@echo off\r\nsetlocal\r\nset "APP_DIR=%~dp0"\r\nset "OPENSTRMBRIDGE_DATA_DIR=%APP_DIR%data"\r\nset "OPENSTRMBRIDGE_WEB_DIR=%APP_DIR%dist"\r\nset "OPENSTRMBRIDGE_GE2O_BINARY=%APP_DIR%resources\\bin\\ge2o.exe"\r\nif not defined OPENSTRMBRIDGE_BACKEND_HOST set "OPENSTRMBRIDGE_BACKEND_HOST=0.0.0.0"\r\nif not defined OPENSTRMBRIDGE_BACKEND_PUBLIC_URL set "OPENSTRMBRIDGE_BACKEND_PUBLIC_URL=http://host.docker.internal:5174"\r\n"%APP_DIR%runtime\\node\\node.exe" "%APP_DIR%server\\storage-check-server.mjs"\r\n`,
       'utf8',
     )
     return
@@ -277,7 +277,7 @@ async function writeLaunchers(releaseDir, target) {
 
   await writeFile(
     launcher,
-    `#!/usr/bin/env sh\nset -eu\nAPP_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"\nexport OPENSTRMBRIDGE_DATA_DIR="$APP_DIR/data"\nexport OPENSTRMBRIDGE_WEB_DIR="$APP_DIR/dist"\nexport OPENSTRMBRIDGE_GE2O_BINARY="$APP_DIR/resources/bin/ge2o"\nexport OPENSTRMBRIDGE_BACKEND_PUBLIC_URL="http://127.0.0.1:5174"\nexec "$APP_DIR/runtime/node/bin/node" "$APP_DIR/server/storage-check-server.mjs"\n`,
+    `#!/usr/bin/env sh\nset -eu\nAPP_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"\nPUBLIC_HOST="\${OPENSTRMBRIDGE_PUBLIC_HOST:-}"\nif [ -z "$PUBLIC_HOST" ]; then\n  case "$(uname -s)" in\n    Darwin) PUBLIC_HOST="host.docker.internal" ;;\n    *) PUBLIC_HOST="$(hostname -I 2>/dev/null | awk '{print $1}')" ;;\n  esac\nfi\nif [ -z "$PUBLIC_HOST" ]; then\n  PUBLIC_HOST="127.0.0.1"\nfi\nexport OPENSTRMBRIDGE_DATA_DIR="$APP_DIR/data"\nexport OPENSTRMBRIDGE_WEB_DIR="$APP_DIR/dist"\nexport OPENSTRMBRIDGE_GE2O_BINARY="$APP_DIR/resources/bin/ge2o"\nexport OPENSTRMBRIDGE_BACKEND_HOST="\${OPENSTRMBRIDGE_BACKEND_HOST:-0.0.0.0}"\nexport OPENSTRMBRIDGE_BACKEND_PUBLIC_URL="\${OPENSTRMBRIDGE_BACKEND_PUBLIC_URL:-http://\${PUBLIC_HOST}:5174}"\nexec "$APP_DIR/runtime/node/bin/node" "$APP_DIR/server/storage-check-server.mjs"\n`,
     'utf8',
   )
   await chmod(launcher, 0o755)
