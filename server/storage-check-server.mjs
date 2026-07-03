@@ -2956,6 +2956,7 @@ async function readStrmAssistantPluginSettings(baseUrl = '', providedSettings, p
   const configFile = resolveStrmAssistantPluginConfigurationFile(pluginInfo, detection)
   let configuration
   let source = 'defaults'
+  let apiWarning = ''
   let syncError = ''
 
   if (pluginInfo) {
@@ -2966,7 +2967,7 @@ async function readStrmAssistantPluginSettings(baseUrl = '', providedSettings, p
         source = 'emby-api'
       }
     } catch (error) {
-      syncError = getErrorMessage(error)
+      apiWarning = getErrorMessage(error)
     }
   }
 
@@ -2975,17 +2976,23 @@ async function readStrmAssistantPluginSettings(baseUrl = '', providedSettings, p
       if (await pathExists(configFile)) {
         configuration = await readJsonConfigFile(configFile)
         source = 'file'
+        syncError = ''
       }
     } catch (error) {
-      syncError = [syncError, `读取插件配置文件失败：${getErrorMessage(error)}`]
+      syncError = [apiWarning, `读取插件配置文件失败：${getErrorMessage(error)}`]
         .filter(Boolean)
         .join('；')
     }
   }
 
+  if (!configuration && apiWarning && !syncError) {
+    syncError = apiWarning
+  }
+
   const normalizedConfiguration = normalizeStrmAssistantPluginConfiguration(configuration)
 
   return {
+    apiWarning,
     configFile,
     configuration: normalizedConfiguration,
     pluginId: getStrmAssistantPluginId(pluginInfo),
@@ -3037,13 +3044,13 @@ async function updateStrmAssistantPluginSettings(values = {}, baseUrl = '') {
 
   let writeWarning = ''
 
-  if (pluginInfo) {
+  if (pluginInfo && currentSettings.source === 'emby-api') {
     try {
       await writeStrmAssistantPluginConfigurationToEmby(settings, pluginInfo, nextConfiguration)
     } catch (error) {
       writeWarning = `已写入插件配置文件，但 Emby 配置接口未接受即时刷新：${getErrorMessage(error)}`
     }
-  } else {
+  } else if (!pluginInfo) {
     writeWarning = '已写入插件配置文件，但当前未从 Emby 插件列表中识别到 Strm Assistant。'
   }
 

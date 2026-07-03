@@ -807,7 +807,7 @@ export function PluginManagementPage() {
           />
         ) : null}
 
-        {status?.pluginSettings?.syncError ? (
+        {status?.pluginSettings?.syncError && status.pluginSettings.source !== 'file' ? (
           <Alert
             className="strm-assistant-alert"
             message="Emby 插件参数同步提示"
