@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { KeyboardEvent, MouseEvent } from 'react'
 import {
+  Alert,
   App as AntApp,
   Button,
   Checkbox,
@@ -14,6 +15,7 @@ import {
 } from 'antd'
 
 import type {
+  StrmAssistantPluginSettingValue,
   StrmAssistantStartResult,
   StrmAssistantStatus,
   StrmAssistantTaskSchedule,
@@ -224,19 +226,70 @@ const strmAssistantTaskItems: StrmAssistantTaskOption[] = [
   },
 ]
 
-function renderSettingControl(item: StrmAssistantSettingItem, disabled: boolean) {
+function getSettingDefaultValue(item: StrmAssistantSettingItem): StrmAssistantPluginSettingValue {
   if (item.type === 'switch') {
-    return <Switch defaultChecked={item.defaultChecked} disabled={disabled} size="small" />
+    return item.defaultChecked === true
+  }
+
+  return item.defaultValue
+}
+
+function getSettingValue(
+  item: StrmAssistantSettingItem,
+  status: StrmAssistantStatus | null,
+): StrmAssistantPluginSettingValue {
+  const value = status?.pluginSettings?.values?.[item.id]
+
+  if (item.type === 'switch') {
+    return typeof value === 'boolean' ? value : getSettingDefaultValue(item)
+  }
+
+  const numericValue = Number(value)
+
+  return Number.isFinite(numericValue) ? numericValue : item.defaultValue
+}
+
+function getPluginSettingSourceText(source: string | undefined) {
+  switch (source) {
+    case 'emby-api':
+      return '同步来源：Emby 插件配置接口'
+    case 'file':
+      return '同步来源：Emby 插件配置文件'
+    case 'defaults':
+      return '同步来源：默认值（尚未读取到 Emby 配置）'
+    default:
+      return '同步来源：等待同步'
+  }
+}
+
+function renderSettingControl(
+  item: StrmAssistantSettingItem,
+  value: StrmAssistantPluginSettingValue,
+  disabled: boolean,
+  loading: boolean,
+  onChange: (value: StrmAssistantPluginSettingValue) => void,
+) {
+  if (item.type === 'switch') {
+    return (
+      <Switch
+        checked={Boolean(value)}
+        disabled={disabled}
+        loading={loading}
+        size="small"
+        onChange={(checked) => onChange(checked)}
+      />
+    )
   }
 
   if (item.type === 'number') {
     return (
       <InputNumber
-        defaultValue={item.defaultValue}
+        value={Number(value)}
         disabled={disabled}
         max={item.max}
         min={item.min}
         size="small"
+        onChange={(nextValue) => onChange(Number(nextValue ?? item.defaultValue))}
       />
     )
   }
@@ -255,7 +308,11 @@ function getScheduleDescription(
   const descriptions = []
 
   if (modes.includes('hourly')) {
-    descriptions.push(`每 ${schedule.intervalHours} 小时执行`)
+    descriptions.push(
+      schedule.embyScheduleEnabled
+        ? `Emby 内部每 ${schedule.intervalHours} 小时执行`
+        : `每 ${schedule.intervalHours} 小时执行`,
+    )
   }
 
   if (modes.includes('after-strm')) {
@@ -294,8 +351,38 @@ function getTaskRunStatusText(schedule: StrmAssistantTaskSchedule | undefined) {
   }
 }
 
+function buildStatusFromStartResult(result: StrmAssistantStartResult): StrmAssistantStatus {
+  return {
+    capabilities: result.capabilities,
+    containerPluginDirectory: result.containerPluginDirectory,
+    detectionSource: result.detectionSource,
+    embyContainerName: result.embyContainerName,
+    foundPluginDirectory: result.foundPluginDirectory,
+    hasExistingPluginFile: result.hasExistingPluginFile,
+    installed: result.installed,
+    pluginDirectory: result.pluginDirectory,
+    pluginFileName: result.pluginFileName,
+    pluginSettings: result.pluginSettings,
+    replacementRequired: result.replacementRequired,
+    sourceExists: result.sourceExists ?? true,
+    sourceFile: result.sourceFile,
+    taskSchedules: result.taskSchedules,
+    taskSyncError: result.taskSyncError,
+    targetFile: result.targetFile,
+  }
+}
+
+function isReplacementRequiredError(error: unknown) {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'replacementRequired' in error &&
+    (error as { replacementRequired?: unknown }).replacementRequired === true
+  )
+}
+
 export function PluginManagementPage() {
-  const { message } = AntApp.useApp()
+  const { message, modal } = AntApp.useApp()
   const cachedDefaults = strmAssistantService.getCachedDefaults()
   const [loadingStatus, setLoadingStatus] = useState(
     () => !cachedDefaults || !cachedDefaults.status.foundPluginDirectory,
@@ -308,6 +395,7 @@ export function PluginManagementPage() {
   const [scheduleIntervalHours, setScheduleIntervalHours] = useState(1)
   const [savingDirectory, setSavingDirectory] = useState(false)
   const [savingSchedule, setSavingSchedule] = useState(false)
+  const [savingSettingId, setSavingSettingId] = useState<string | null>(null)
   const [starting, setStarting] = useState(false)
   const [startResult, setStartResult] = useState<StrmAssistantStartResult | null>(null)
   const [status, setStatus] = useState<StrmAssistantStatus | null>(
@@ -340,14 +428,9 @@ export function PluginManagementPage() {
     .filter((task) => isTaskRunActive(status?.taskSchedules?.[task.id]))
     .map((task) => task.id)
     .join(',')
+  const pluginSettingSourceText = getPluginSettingSourceText(status?.pluginSettings?.source)
 
   useEffect(() => {
-    const cachedDefaults = strmAssistantService.getCachedDefaults()
-
-    if (cachedDefaults?.status.foundPluginDirectory) {
-      return undefined
-    }
-
     let mounted = true
 
     async function loadStatus() {
@@ -413,29 +496,48 @@ export function PluginManagementPage() {
     }
   }, [activeTaskRunKey])
 
-  async function handleStart() {
+  function showReplacementConfirm() {
+    modal.confirm({
+      cancelText: '暂不替换',
+      content: (
+        <div>
+          <p>
+            检测到 Emby 插件目录下已经存在 {status?.pluginFileName ?? 'StrmAssistant.dll'}，
+            这通常表示用户之前安装过原版神医助手插件。
+          </p>
+          <p>
+            继续启动会先删除原文件，再替换为 OpenStrmBridge 特调版，用于同步本程序内的任务进度与执行逻辑。
+          </p>
+          {status?.targetFile ? <p>目标文件：{status.targetFile}</p> : null}
+        </div>
+      ),
+      okButtonProps: { danger: true },
+      okText: '替换并启动',
+      onOk: () => handleStart(true),
+      title: '是否替换已有神医助手插件？',
+    })
+  }
+
+  async function handleStart(forceReplace = false) {
+    if (!forceReplace && status?.replacementRequired) {
+      showReplacementConfirm()
+      return
+    }
+
     setStarting(true)
 
     try {
-      const result = await strmAssistantService.start()
+      const result = await strmAssistantService.start({ forceReplace })
 
       setStartResult(result)
-      setStatus({
-        capabilities: result.capabilities,
-        containerPluginDirectory: result.containerPluginDirectory,
-        detectionSource: result.detectionSource,
-        embyContainerName: result.embyContainerName,
-        foundPluginDirectory: result.foundPluginDirectory,
-        installed: result.installed,
-        pluginDirectory: result.pluginDirectory,
-        pluginFileName: result.pluginFileName,
-        sourceExists: true,
-        sourceFile: result.sourceFile,
-        taskSchedules: result.taskSchedules,
-        targetFile: result.targetFile,
-      })
+      setStatus(buildStatusFromStartResult(result))
       message.success(result.message)
     } catch (error) {
+      if (!forceReplace && isReplacementRequiredError(error)) {
+        showReplacementConfirm()
+        return
+      }
+
       message.error(error instanceof Error ? error.message : '启动神医助手失败')
     } finally {
       setStarting(false)
@@ -479,6 +581,41 @@ export function PluginManagementPage() {
       message.error(error instanceof Error ? error.message : '保存插件目录失败')
     } finally {
       setSavingDirectory(false)
+    }
+  }
+
+  async function handlePluginSettingChange(
+    item: StrmAssistantSettingItem,
+    value: StrmAssistantPluginSettingValue,
+  ) {
+    if (!installed) {
+      message.warning('请先启动神医助手')
+      return
+    }
+
+    const nextValue =
+      item.type === 'number'
+        ? Math.max(item.min, Math.min(item.max, Number(value) || item.defaultValue))
+        : Boolean(value)
+
+    setSavingSettingId(item.id)
+
+    try {
+      const defaults = await strmAssistantService.setPluginSettings({
+        [item.id]: nextValue,
+      })
+
+      setStatus(defaults.status)
+
+      if (defaults.status.pluginSettings?.writeWarning) {
+        message.warning(defaults.status.pluginSettings.writeWarning)
+      } else {
+        message.success('插件参数已同步到 Emby 配置')
+      }
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '同步插件参数失败')
+    } finally {
+      setSavingSettingId(null)
     }
   }
 
@@ -618,7 +755,9 @@ export function PluginManagementPage() {
         <div className="strm-assistant-detection">
           <div className="strm-assistant-metric">
             <span>安装状态</span>
-            <Tag color={installed ? 'success' : undefined}>{installed ? '已安装' : '未安装'}</Tag>
+            <Tag color={installed ? 'success' : status?.replacementRequired ? 'warning' : undefined}>
+              {installed ? '已安装' : status?.replacementRequired ? '需确认替换' : '未安装'}
+            </Tag>
           </div>
           <div className="strm-assistant-metric">
             <span>插件目录</span>
@@ -648,6 +787,46 @@ export function PluginManagementPage() {
           </button>
         </div>
 
+        {status?.replacementRequired ? (
+          <Alert
+            className="strm-assistant-alert"
+            message="检测到已有同名插件"
+            showIcon
+            description={`目标目录下已存在 ${status.pluginFileName}，可能是用户之前安装的原版神医助手。启动时会先弹出确认，确认后删除原版本并替换为 OpenStrmBridge 特调版。`}
+            type="warning"
+          />
+        ) : null}
+
+        {status?.taskSyncError ? (
+          <Alert
+            className="strm-assistant-alert"
+            message="Emby 内部任务同步失败"
+            showIcon
+            description={`本程序暂时无法读取 Emby 内部神医助手任务进度和执行逻辑：${status.taskSyncError}`}
+            type="warning"
+          />
+        ) : null}
+
+        {status?.pluginSettings?.syncError ? (
+          <Alert
+            className="strm-assistant-alert"
+            message="Emby 插件参数同步提示"
+            showIcon
+            description={`本程序已尽量从插件配置文件读取参数，但 Emby 配置接口暂时不可用：${status.pluginSettings.syncError}`}
+            type="warning"
+          />
+        ) : null}
+
+        {status?.pluginSettings?.writeWarning ? (
+          <Alert
+            className="strm-assistant-alert"
+            message="插件参数已写入配置文件"
+            showIcon
+            description={status.pluginSettings.writeWarning}
+            type="info"
+          />
+        ) : null}
+
         {startResult ? (
           <p className="strm-assistant-result">
             {startResult.restarted
@@ -662,7 +841,12 @@ export function PluginManagementPage() {
         <header>
           <div>
             <h3>插件功能</h3>
-            <p>{installed ? '神医助手插件已启动' : '未启动时不可修改'}</p>
+            <p>
+              {installed ? `${pluginSettingSourceText}，修改后会写回 Emby 实际插件配置。` : '未启动时不可修改'}
+            </p>
+            {status?.pluginSettings?.configFile ? (
+              <p>配置文件：{status.pluginSettings.configFile}</p>
+            ) : null}
           </div>
           <Tag color={installed ? 'success' : undefined}>{installed ? '可修改' : '未启动'}</Tag>
         </header>
@@ -674,17 +858,27 @@ export function PluginManagementPage() {
                 <section className="strm-assistant-option-group" key={group.id}>
                   <h4>{group.title}</h4>
                   <div className="strm-assistant-option-list">
-                    {group.items.map((item) => (
-                      <article className="strm-assistant-option-row" key={item.id}>
-                        <div className="strm-assistant-option-control">
-                          {renderSettingControl(item, !installed)}
-                        </div>
-                        <div>
-                          {item.type === 'switch' ? <strong>{item.label}</strong> : null}
-                          <p>{item.description}</p>
-                        </div>
-                      </article>
-                    ))}
+                    {group.items.map((item) => {
+                      const value = getSettingValue(item, status)
+
+                      return (
+                        <article className="strm-assistant-option-row" key={item.id}>
+                          <div className="strm-assistant-option-control">
+                            {renderSettingControl(
+                              item,
+                              value,
+                              !installed || savingSettingId !== null,
+                              savingSettingId === item.id,
+                              (nextValue) => void handlePluginSettingChange(item, nextValue),
+                            )}
+                          </div>
+                          <div>
+                            {item.type === 'switch' ? <strong>{item.label}</strong> : null}
+                            <p>{item.description}</p>
+                          </div>
+                        </article>
+                      )
+                    })}
                   </div>
                 </section>
               ))}
@@ -735,6 +929,18 @@ export function PluginManagementPage() {
                   <p>{task.description}</p>
                   <span className="strm-assistant-task-schedule">
                     执行逻辑：{getScheduleDescription(schedule)}
+                  </span>
+                  <span className="strm-assistant-task-schedule">
+                    Emby 内部任务：
+                    {schedule?.embyTaskName
+                      ? `${schedule.embyTaskName}${
+                          schedule.embyTaskState ? `（${schedule.embyTaskState}）` : ''
+                        }${
+                          schedule.embyScheduleEnabled
+                            ? `，${schedule.embyTriggerCount ?? 1} 个触发器`
+                            : ''
+                        }`
+                      : '未同步'}
                   </span>
                   <div className="strm-assistant-task-progress">
                     <span>执行进度：{getTaskRunStatusText(schedule)}</span>

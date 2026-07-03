@@ -1,6 +1,7 @@
 import { Navigate, useLocation, useRoutes } from 'react-router-dom'
 import type { RouteObject } from 'react-router-dom'
 
+import { ApiAccessPage } from '../features/api-access/ApiAccessPage'
 import { LoginPage } from '../features/auth/LoginPage'
 import { useAuth } from '../features/auth/authContext'
 import { FileBrowserPage } from '../features/file-browser/FileBrowserPage'
@@ -46,6 +47,7 @@ const routeDefinitions: RouteObject[] = [
       { path: routes.storage.path.slice(1), element: <StorageManagementPage /> },
       { path: routes.browser.path.slice(1), element: <FileBrowserPage /> },
       { path: routes.plugins.path.slice(1), element: <PluginManagementPage /> },
+      { path: routes.apiAccess.path.slice(1), element: <ApiAccessPage /> },
       { path: routes.settings.path.slice(1), element: <SystemSettingsPage /> },
       { path: '*', element: <Navigate to={routes.tasks.path} replace /> },
     ],

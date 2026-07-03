@@ -241,7 +241,50 @@ function renderTaskStatus(status: TaskStatus) {
     return <span className="status-pill status-pill-danger">失败</span>
   }
 
+  if (status === 'partial') {
+    return <span className="status-pill status-pill-warning">部分失败</span>
+  }
+
+  if (status === 'succeeded') {
+    return <span className="status-pill status-pill-success">成功</span>
+  }
+
   return <span className="status-pill">空闲</span>
+}
+
+function getTaskLogLineClassName(line: string) {
+  const text = line.trim()
+  const hasFailureCount = /(?:失败|目录读取失败)\s*[1-9]\d*\s*个/.test(text)
+
+  if (
+    /^(生成失败|目录读取失败|OpenList 目录缓存刷新失败|更新 STRM 索引失败)/.test(text) ||
+    /任务失败:/.test(text) ||
+    hasFailureCount
+  ) {
+    return 'task-log-line task-log-line-danger'
+  }
+
+  if (
+    /^(生成成功|生成:|跳过已存在|已刷新 OpenList 目录缓存|已更新 STRM 索引)/.test(text) ||
+    (/^生成完成/.test(text) && !hasFailureCount) ||
+    /任务完成$/.test(text)
+  ) {
+    return 'task-log-line task-log-line-success'
+  }
+
+  return 'task-log-line'
+}
+
+function renderTaskLogContent(logContent: string) {
+  const content = logContent || '暂无日志。运行任务后，这里会显示扫描与 STRM 生成记录。'
+  const lines = content.split('\n')
+
+  return lines.map((line, index) => (
+    <span className={getTaskLogLineClassName(line)} key={`${index}-${line}`}>
+      {line}
+      {index < lines.length - 1 ? '\n' : null}
+    </span>
+  ))
 }
 
 export function TaskManagementPage() {
@@ -589,7 +632,11 @@ export function TaskManagementPage() {
       setLogContent(response.task.lastLog ?? '')
       setLogStatus(response.task.status)
 
-      if (response.result.ok) {
+      if (response.result.status === 'partial' || response.result.partial) {
+        message.warning(
+          `${task.name} 部分完成：生成 ${response.result.generated} 个，跳过 ${response.result.skipped} 个，失败 ${response.result.failed} 个，请查看日志`,
+        )
+      } else if (response.result.ok) {
         message.success(
           `${task.name} 已生成 ${response.result.generated} 个 STRM，跳过 ${response.result.skipped} 个`,
         )
@@ -747,7 +794,8 @@ export function TaskManagementPage() {
 
   const outputPath = getTaskOutputPath(watchedName, taskOutputRoot)
   const runningCount = tasks.filter((task) => task.status === 'running').length
-  const failedCount = tasks.filter((task) => task.status === 'failed').length
+  const failedCount = tasks.filter((task) => task.status === 'failed' || task.status === 'partial')
+    .length
   const totalMediaCount = tasks.reduce(
     (total, task) => total + (task.lastResult?.mediaFiles ?? task.lastResult?.generated ?? 0),
     0,
@@ -990,9 +1038,7 @@ export function TaskManagementPage() {
         width={780}
         onCancel={() => setLogModalOpen(false)}
       >
-        <pre className="task-log-viewer">
-          {logContent || '暂无日志。运行任务后，这里会显示扫描与 STRM 生成记录。'}
-        </pre>
+        <pre className="task-log-viewer">{renderTaskLogContent(logContent)}</pre>
       </Modal>
     </PagePanel>
   )

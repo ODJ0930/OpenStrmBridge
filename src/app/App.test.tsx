@@ -121,6 +121,7 @@ describe('OpenStrmBridge shell', () => {
     ['/storage', '存储管理', '存储总数'],
     ['/browser', '存储浏览', '当前存储'],
     ['/plugins', '神医助手（适配本程序的社区开源版本）', '安装状态'],
+    ['/api-access', 'API 接口', 'API 状态'],
     ['/settings', '系统设置', 'Webhook'],
   ])('renders the refreshed dashboard shell for %s', (path, heading, summaryLabel) => {
     renderRoute(path)

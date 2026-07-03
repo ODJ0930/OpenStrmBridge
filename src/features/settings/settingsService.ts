@@ -37,6 +37,7 @@ type LegacyProxy302Settings = Proxy302Settings & {
 const backendBaseUrl = getApiBaseUrl()
 const settingsUrl = `${backendBaseUrl}/api/settings`
 const defaultOutputRoot = '/opt/openstrmbridge/strm'
+const defaultThreadCount = 1
 
 function getProgramBaseUrl() {
   if (typeof window === 'undefined') {
@@ -101,6 +102,16 @@ function normalizeOutputRoot(outputRoot: string | undefined) {
   return normalized
 }
 
+function normalizeThreadCount(threadCount: number | string | undefined) {
+  const parsed = Number.parseInt(String(threadCount ?? ''), 10)
+
+  if (!Number.isFinite(parsed)) {
+    return defaultThreadCount
+  }
+
+  return Math.max(1, Math.min(64, parsed))
+}
+
 function getDefaultStrmSettings(): StrmSettings {
   const baseUrl = getProgramBaseUrl()
 
@@ -114,6 +125,7 @@ function getDefaultStrmSettings(): StrmSettings {
     cloudNamingMode: '文件编号模式',
     signEnabled: true,
     signSecret: createSignSecret(),
+    threadCount: defaultThreadCount,
     previewUrl: '',
   }
 }
@@ -152,6 +164,7 @@ function normalizeStrmSettings(settings: Partial<StrmSettings> = {}): StrmSettin
     ...settings,
     baseUrl: settings.baseUrl || getProgramBaseUrl() || defaults.baseUrl,
     outputRoot: normalizeOutputRoot(settings.outputRoot || defaults.outputRoot),
+    threadCount: normalizeThreadCount(settings.threadCount ?? defaults.threadCount),
   }
 
   return {

@@ -119,6 +119,7 @@ describe('TaskManagementPage', () => {
         sidecarExtensions: 'nfo,jpg',
         signEnabled: true,
         signSecret: 'secret',
+        threadCount: 1,
       },
       webhook: {
         embyDeleteSync: true,

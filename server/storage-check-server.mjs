@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
 import {
@@ -82,6 +82,67 @@ const strmAssistantOptionLabels = {
   PluginOptions: '插件总配置',
   TypeOptions: '类型设置',
   UIFunctionOptions: '界面功能',
+}
+
+const strmAssistantPluginSettingDefinitions = {
+  'auto-merge-version': {
+    defaultValue: false,
+    path: ['ExperienceEnhanceOptions', 'MergeMultiVersion'],
+    type: 'boolean',
+  },
+  'catchup-mode': {
+    defaultValue: false,
+    path: ['GeneralOptions', 'CatchupMode'],
+    type: 'boolean',
+  },
+  'episode-refresh-days': {
+    defaultValue: 365,
+    max: 3650,
+    min: 1,
+    path: ['MetadataEnhanceOptions', 'EpisodeRefreshLookbackDays'],
+    type: 'number',
+  },
+  'extract-workers': {
+    defaultValue: 1,
+    max: 20,
+    min: 1,
+    path: ['GeneralOptions', 'MaxConcurrentCount'],
+    type: 'number',
+  },
+  'include-episodes-extras': {
+    defaultValue: false,
+    path: ['MediaInfoExtractOptions', 'IncludeExtra'],
+    type: 'boolean',
+  },
+  'local-workers': {
+    defaultValue: 1,
+    max: 20,
+    min: 1,
+    path: ['GeneralOptions', 'Tier2MaxConcurrentCount'],
+    type: 'number',
+  },
+  'native-intro-enhance': {
+    defaultValue: false,
+    path: ['IntroSkipOptions', 'UnlockIntroSkip'],
+    type: 'boolean',
+  },
+  'play-session-intro': {
+    defaultValue: false,
+    path: ['IntroSkipOptions', 'EnableIntroSkip'],
+    type: 'boolean',
+  },
+  'preview-thumbnail-enhance': {
+    defaultValue: false,
+    path: ['MediaInfoExtractOptions', 'EnableImageCapture'],
+    type: 'boolean',
+  },
+  'single-thread-delay': {
+    defaultValue: 0,
+    max: 60,
+    min: 0,
+    path: ['GeneralOptions', 'CooldownDurationSeconds'],
+    type: 'number',
+  },
 }
 
 const strmAssistantTaskLabels = {
@@ -261,7 +322,7 @@ new MutationObserver(openstrmBridgeCleanupHeader).observe(document.documentEleme
 
 function sendJson(response, statusCode, payload) {
   response.writeHead(statusCode, {
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-OpenStrmBridge-Api-Key',
     'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
     'Access-Control-Allow-Origin': '*',
     'Content-Type': 'application/json; charset=utf-8',
@@ -277,6 +338,10 @@ function createSecret(length = 20) {
   return randomBytes(length).toString('base64url')
 }
 
+function createApiAccessKey() {
+  return `osb_${createSecret(32)}`
+}
+
 function getRequestOrigin(request) {
   const origin = request.headers.origin
 
@@ -286,6 +351,157 @@ function getRequestOrigin(request) {
 
   const host = request.headers.host
   return host ? `http://${host}` : ''
+}
+
+function getRequestHostOrigin(request) {
+  const forwardedHost = getHeaderValue(request.headers['x-forwarded-host'])
+    .split(',')
+    .map((value) => value.trim())
+    .find(Boolean)
+  const hostHeader = forwardedHost || getHeaderValue(request.headers.host).trim()
+
+  if (!hostHeader) {
+    return ''
+  }
+
+  const forwardedProto = getHeaderValue(request.headers['x-forwarded-proto'])
+    .split(',')
+    .map((value) => value.trim())
+    .find(Boolean)
+  const proto = forwardedProto || 'http'
+
+  return `${proto}://${hostHeader}`
+}
+
+function normalizeOrigin(value) {
+  const rawValue = String(value ?? '').trim()
+
+  if (!rawValue) {
+    return ''
+  }
+
+  try {
+    const url = new URL(rawValue)
+    return `${url.protocol}//${url.host}`
+  } catch {
+    return ''
+  }
+}
+
+function getRefererOrigin(request) {
+  return normalizeOrigin(getHeaderValue(request.headers.referer))
+}
+
+function getOriginHeader(request) {
+  return normalizeOrigin(getHeaderValue(request.headers.origin))
+}
+
+function getTrustedUiOrigins(request, settings = {}) {
+  const origins = new Set(
+    [
+      getRequestHostOrigin(request),
+      settings.strm?.baseUrl,
+      'http://127.0.0.1:5173',
+      'http://localhost:5173',
+      'http://[::1]:5173',
+      ...String(process.env.OPENSTRMBRIDGE_UI_ORIGINS ?? '')
+        .split(',')
+        .map((value) => value.trim())
+        .filter(Boolean),
+    ]
+      .map(normalizeOrigin)
+      .filter(Boolean),
+  )
+
+  return origins
+}
+
+function isTrustedUiRequest(request, settings = {}) {
+  const secFetchSite = getHeaderValue(request.headers['sec-fetch-site']).toLowerCase()
+
+  if (secFetchSite === 'same-origin') {
+    return true
+  }
+
+  const trustedOrigins = getTrustedUiOrigins(request, settings)
+  const requestOrigins = [getOriginHeader(request), getRefererOrigin(request)].filter(Boolean)
+
+  return requestOrigins.some((origin) => trustedOrigins.has(origin))
+}
+
+function getApiAccessKeyFromRequest(request) {
+  const authorization = getHeaderValue(request.headers.authorization).trim()
+  const bearerMatch = authorization.match(/^Bearer\s+(.+)$/i)
+
+  if (bearerMatch?.[1]) {
+    return bearerMatch[1].trim()
+  }
+
+  return getHeaderValue(request.headers['x-openstrmbridge-api-key']).trim()
+}
+
+function isApiAccessKeyValid(providedKey, expectedKey) {
+  const provided = String(providedKey ?? '')
+  const expected = String(expectedKey ?? '')
+
+  if (!provided || !expected) {
+    return false
+  }
+
+  const providedBuffer = Buffer.from(provided)
+  const expectedBuffer = Buffer.from(expected)
+
+  return (
+    providedBuffer.length === expectedBuffer.length &&
+    timingSafeEqual(providedBuffer, expectedBuffer)
+  )
+}
+
+function isProtectedManagementApiRequest(request) {
+  const pathname = new URL(request.url || '/', `http://127.0.0.1:${port}`).pathname
+
+  if (!pathname.startsWith('/api/')) {
+    return false
+  }
+
+  return !(
+    pathname === '/api/health' ||
+    pathname.startsWith('/api/strm/redirect/') ||
+    pathname.startsWith('/api/openlist/direct/')
+  )
+}
+
+async function requireApiAccessIfExternal(request, response) {
+  if (!isProtectedManagementApiRequest(request)) {
+    return false
+  }
+
+  const settings = await readSettings(getRequestOrigin(request))
+
+  if (isTrustedUiRequest(request, settings)) {
+    return false
+  }
+
+  if (settings.apiAccess?.enabled === false) {
+    sendJson(response, 403, {
+      ok: false,
+      title: 'API 接口已关闭',
+      message: 'API 接口当前处于关闭状态，请先在 OpenStrmBridge 管理台中开启。',
+    })
+    return true
+  }
+
+  if (isApiAccessKeyValid(getApiAccessKeyFromRequest(request), settings.apiAccess?.key)) {
+    return false
+  }
+
+  sendJson(response, 401, {
+    ok: false,
+    title: 'API 秘钥无效',
+    message:
+      '外部调用 OpenStrmBridge 管理接口需要提供 Authorization: Bearer <key> 或 X-OpenStrmBridge-Api-Key。',
+  })
+  return true
 }
 
 function normalizeOutputRoot(outputRoot) {
@@ -299,6 +515,29 @@ function normalizeOutputRoot(outputRoot) {
   }
 
   return normalized
+}
+
+function normalizeStrmThreadCount(value) {
+  const parsed = Number.parseInt(String(value ?? ''), 10)
+
+  if (!Number.isFinite(parsed)) {
+    return 1
+  }
+
+  return Math.max(1, Math.min(64, parsed))
+}
+
+function normalizeApiAccessSettings(apiAccess = {}) {
+  const now = new Date().toISOString()
+  const key = String(apiAccess?.key ?? '').trim() || createApiAccessKey()
+  const createdAt = String(apiAccess?.createdAt ?? '').trim() || now
+
+  return {
+    createdAt,
+    enabled: apiAccess?.enabled !== false,
+    key,
+    updatedAt: String(apiAccess?.updatedAt ?? '').trim() || createdAt,
+  }
 }
 
 function normalizeProxy302Settings(proxySettings = {}) {
@@ -330,6 +569,7 @@ function createDefaultSettings(baseUrl = '') {
   const webhookToken = createSecret(12)
 
   return {
+    apiAccess: normalizeApiAccessSettings(),
     proxy302: {
       apiSecret: createSecret(18),
       configPath: ge2oConfigFile,
@@ -361,6 +601,7 @@ function createDefaultSettings(baseUrl = '') {
       sidecarExtensions: 'nfo,jpg,png,ass,srt',
       signEnabled: true,
       signSecret: createSecret(15),
+      threadCount: 1,
     },
     webhook: {
       embyDeleteSync: true,
@@ -372,6 +613,7 @@ function createDefaultSettings(baseUrl = '') {
 function mergeSettings(settings, baseUrl = '') {
   const defaults = createDefaultSettings(baseUrl)
   const nextSettings = {
+    apiAccess: normalizeApiAccessSettings(settings?.apiAccess ?? defaults.apiAccess),
     emby: normalizeEmbySettings(settings?.emby, settings?.proxy302),
     proxy302: normalizeProxy302Settings({
       ...defaults.proxy302,
@@ -382,6 +624,7 @@ function mergeSettings(settings, baseUrl = '') {
       ...settings?.strm,
       baseUrl: normalizeEndpoint(settings?.strm?.baseUrl || baseUrl || defaults.strm.baseUrl),
       outputRoot: normalizeOutputRoot(settings?.strm?.outputRoot || defaults.strm.outputRoot),
+      threadCount: normalizeStrmThreadCount(settings?.strm?.threadCount ?? defaults.strm.threadCount),
     },
     strmAssistant: {
       ...defaults.strmAssistant,
@@ -412,8 +655,7 @@ async function readSettings(baseUrl = '') {
   await ensureDataDir()
 
   try {
-    const content = await readFile(settingsFile, 'utf8')
-    return mergeSettings(JSON.parse(content), baseUrl)
+    return mergeSettings(await readRawSettings(), baseUrl)
   } catch (error) {
     if (error?.code === 'ENOENT') {
       return mergeSettings(undefined, baseUrl)
@@ -421,6 +663,11 @@ async function readSettings(baseUrl = '') {
 
     throw error
   }
+}
+
+async function readRawSettings() {
+  const content = await readFile(settingsFile, 'utf8')
+  return JSON.parse(content)
 }
 
 async function writeSettings(settings) {
@@ -454,6 +701,67 @@ async function writeSettings(settings) {
 
   await writeFile(`${settingsFile}.tmp`, JSON.stringify(nextSettings, null, 2), 'utf8')
   await rename(`${settingsFile}.tmp`, settingsFile)
+}
+
+async function ensureApiAccessKey(baseUrl = '') {
+  await ensureDataDir()
+
+  let rawSettings
+
+  try {
+    rawSettings = await readRawSettings()
+  } catch (error) {
+    if (error?.code !== 'ENOENT') {
+      throw error
+    }
+  }
+
+  const settings = mergeSettings(rawSettings, baseUrl)
+  const existingKey = String(rawSettings?.apiAccess?.key ?? '').trim()
+
+  if (!existingKey) {
+    await writeSettings(settings)
+  }
+
+  return settings.apiAccess
+}
+
+async function regenerateApiAccessKey(baseUrl = '') {
+  const currentSettings = await readSettings(baseUrl)
+  const now = new Date().toISOString()
+  const nextSettings = mergeSettings(
+    {
+      ...currentSettings,
+      apiAccess: {
+        ...currentSettings.apiAccess,
+        key: createApiAccessKey(),
+        updatedAt: now,
+      },
+    },
+    baseUrl,
+  )
+
+  await writeSettings(nextSettings)
+  return nextSettings.apiAccess
+}
+
+async function updateApiAccessSettings(values = {}, baseUrl = '') {
+  const currentSettings = await readSettings(baseUrl)
+  const now = new Date().toISOString()
+  const nextSettings = mergeSettings(
+    {
+      ...currentSettings,
+      apiAccess: {
+        ...currentSettings.apiAccess,
+        enabled: values.enabled !== false,
+        updatedAt: now,
+      },
+    },
+    baseUrl,
+  )
+
+  await writeSettings(nextSettings)
+  return nextSettings.apiAccess
 }
 
 async function updateSettingsSection(section, values, baseUrl = '') {
@@ -833,7 +1141,12 @@ function firstBoolean(defaultValue, ...values) {
 }
 
 function normalizeTaskStatus(status) {
-  if (status === 'running' || status === 'failed') {
+  if (
+    status === 'running' ||
+    status === 'failed' ||
+    status === 'partial' ||
+    status === 'succeeded'
+  ) {
     return status
   }
 
@@ -1628,6 +1941,12 @@ async function pathExists(filePath) {
   }
 }
 
+async function hashFile(filePath) {
+  const hash = createHash('sha256')
+  hash.update(await readFile(filePath))
+  return hash.digest('hex')
+}
+
 function normalizeLocalFilePath(filePath) {
   return String(filePath ?? '').trim()
 }
@@ -2011,8 +2330,24 @@ async function getEmbyPluginStatus(baseUrl = '') {
   const pluginDirectory = detection.pluginDirectory
   const pluginFileName = strmAssistantInstalledPluginFileName
   const targetFile = pluginDirectory ? path.join(pluginDirectory, pluginFileName) : ''
-  const installed = Boolean(targetFile && (await pathExists(targetFile)))
+  const hasExistingPluginFile = Boolean(targetFile && (await pathExists(targetFile)))
+  let replacementRequired = false
+
+  if (hasExistingPluginFile && path.resolve(sourceFile) !== path.resolve(targetFile)) {
+    try {
+      replacementRequired = (await hashFile(sourceFile)) !== (await hashFile(targetFile))
+    } catch {
+      replacementRequired = true
+    }
+  }
+
+  const installed = hasExistingPluginFile && !replacementRequired
   const capabilities = await getStrmAssistantCapabilities(sourceFile, installed)
+  const pluginSettings = await readStrmAssistantPluginSettings(baseUrl, settings, detection)
+  const { taskSchedules, taskSyncError } = await syncStrmAssistantTaskSchedulesFromEmby(
+    baseUrl,
+    settings,
+  )
 
   return {
     capabilities,
@@ -2020,17 +2355,30 @@ async function getEmbyPluginStatus(baseUrl = '') {
     detectionSource: detection.source,
     embyContainerName: detection.embyContainerName ?? '',
     foundPluginDirectory: detection.found,
+    hasExistingPluginFile,
     installed,
     pluginDirectory,
     pluginFileName,
+    pluginSettings: {
+      configFile: pluginSettings.configFile,
+      pluginId: pluginSettings.pluginId,
+      pluginName: pluginSettings.pluginName,
+      pluginVersion: pluginSettings.pluginVersion,
+      source: pluginSettings.source,
+      syncError: pluginSettings.syncError,
+      updatedAt: pluginSettings.updatedAt,
+      values: pluginSettings.values,
+    },
+    replacementRequired,
     sourceExists: Boolean(sourceFile && (await pathExists(sourceFile))),
     sourceFile,
-    taskSchedules: settings.strmAssistant?.taskSchedules ?? {},
+    taskSchedules,
+    taskSyncError,
     targetFile,
   }
 }
 
-async function installEmbyPlugin(baseUrl = '') {
+async function installEmbyPlugin(baseUrl = '', options = {}) {
   const sourceFile = bundledStrmAssistantPluginFile
   const detection = await detectEmbyPluginDirectory(baseUrl)
   const pluginDirectory = detection.pluginDirectory
@@ -2063,6 +2411,30 @@ async function installEmbyPlugin(baseUrl = '') {
   await mkdir(pluginDirectory, { recursive: true })
 
   const targetFile = path.join(pluginDirectory, strmAssistantInstalledPluginFileName)
+  const targetExists = await pathExists(targetFile)
+  let replacementRequired = false
+
+  if (targetExists && path.resolve(sourceFile) !== path.resolve(targetFile)) {
+    try {
+      replacementRequired = (await hashFile(sourceFile)) !== (await hashFile(targetFile))
+    } catch {
+      replacementRequired = true
+    }
+  }
+
+  if (replacementRequired && options.forceReplace !== true) {
+    const error = new Error(
+      `检测到 Emby 插件目录中已存在 ${strmAssistantInstalledPluginFileName}，如需使用 OpenStrmBridge 特调版，请确认替换原插件。`,
+    )
+    error.statusCode = 409
+    error.title = '检测到已有神医助手插件'
+    error.replacementRequired = true
+    throw error
+  }
+
+  if (replacementRequired) {
+    await unlink(targetFile)
+  }
 
   if (path.resolve(sourceFile) !== path.resolve(targetFile)) {
     await copyFile(sourceFile, targetFile)
@@ -2070,6 +2442,7 @@ async function installEmbyPlugin(baseUrl = '') {
 
   const targetStat = await stat(targetFile)
   const capabilities = await getStrmAssistantCapabilities(sourceFile, true)
+  const currentStatus = await getEmbyPluginStatus(baseUrl)
 
   return {
     capabilities,
@@ -2077,13 +2450,18 @@ async function installEmbyPlugin(baseUrl = '') {
     detectionSource: detection.source,
     embyContainerName: detection.embyContainerName ?? '',
     foundPluginDirectory: true,
+    hasExistingPluginFile: true,
     installed: true,
     message: '神医助手插件已安装到 Emby 插件目录。',
     pluginDirectory,
     pluginFileName: strmAssistantInstalledPluginFileName,
+    replacementRequired: false,
     size: targetStat.size,
+    sourceExists: Boolean(sourceFile && (await pathExists(sourceFile))),
     sourceFile,
-    taskSchedules: (await readSettings(baseUrl)).strmAssistant?.taskSchedules ?? {},
+    pluginSettings: currentStatus.pluginSettings,
+    taskSchedules: currentStatus.taskSchedules,
+    taskSyncError: currentStatus.taskSyncError,
     targetFile,
     updatedAt: targetStat.mtime.toISOString(),
   }
@@ -2107,8 +2485,8 @@ async function restartEmbyServer(embyContainerName) {
   }
 }
 
-async function startStrmAssistant(baseUrl = '') {
-  const installedPlugin = await installEmbyPlugin(baseUrl)
+async function startStrmAssistant(baseUrl = '', options = {}) {
+  const installedPlugin = await installEmbyPlugin(baseUrl, options)
 
   try {
     const restartResult = await restartEmbyServer(installedPlugin.embyContainerName)
@@ -2185,9 +2563,11 @@ async function updateStrmAssistantTaskSchedule(values, baseUrl = '') {
     [nextSchedule.taskId]: {
       ...previousSchedule,
       ...nextSchedule,
+      embyScheduleEnabled: previousSchedule.embyScheduleEnabled,
       embyTaskId: previousSchedule.embyTaskId,
       embyTaskName: previousSchedule.embyTaskName,
       embyTaskState: previousSchedule.embyTaskState,
+      embyTriggerCount: previousSchedule.embyTriggerCount,
       lastError: previousSchedule.lastError,
       lastFinishedAt: previousSchedule.lastFinishedAt,
       lastTriggeredAt: nextSchedule.lastTriggeredAt || previousSchedule.lastTriggeredAt || '',
@@ -2302,6 +2682,386 @@ async function requestEmbyApi(settings, apiPath, init = {}) {
   }
 }
 
+function isPlainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function getNestedValue(source, segments) {
+  let current = source
+
+  for (const segment of segments) {
+    if (!isPlainObject(current)) {
+      return undefined
+    }
+
+    current = current[segment]
+  }
+
+  return current
+}
+
+function setNestedValue(target, segments, value) {
+  let current = target
+
+  for (let index = 0; index < segments.length - 1; index += 1) {
+    const segment = segments[index]
+
+    if (!isPlainObject(current[segment])) {
+      current[segment] = {}
+    }
+
+    current = current[segment]
+  }
+
+  current[segments[segments.length - 1]] = value
+}
+
+function normalizeStrmAssistantPluginSettingValue(definition, value) {
+  if (definition.type === 'boolean') {
+    if (typeof value === 'boolean') {
+      return value
+    }
+
+    if (typeof value === 'number') {
+      return value !== 0
+    }
+
+    const normalized = String(value ?? '').trim().toLowerCase()
+
+    if (['1', 'true', 'yes', 'on', 'enabled'].includes(normalized)) {
+      return true
+    }
+
+    if (['0', 'false', 'no', 'off', 'disabled'].includes(normalized)) {
+      return false
+    }
+
+    return definition.defaultValue
+  }
+
+  const numeric = Number(value)
+  const fallback = Number(definition.defaultValue ?? 0)
+  const finiteValue = Number.isFinite(numeric) ? numeric : fallback
+  const roundedValue = Math.round(finiteValue)
+
+  return Math.max(
+    Number(definition.min ?? Number.MIN_SAFE_INTEGER),
+    Math.min(Number(definition.max ?? Number.MAX_SAFE_INTEGER), roundedValue),
+  )
+}
+
+function createDefaultStrmAssistantPluginConfiguration() {
+  const configuration = {
+    AboutOptions: {},
+    ExperienceEnhanceOptions: {
+      MergeMultiVersion: false,
+    },
+    GeneralOptions: {
+      CatchupMode: false,
+      CooldownDurationSeconds: 0,
+      MaxConcurrentCount: 1,
+      Tier2MaxConcurrentCount: 1,
+    },
+    IntroSkipOptions: {
+      EnableIntroSkip: false,
+      UnlockIntroSkip: false,
+    },
+    MediaInfoExtractOptions: {
+      EnableImageCapture: false,
+      IncludeExtra: false,
+    },
+    MetadataEnhanceOptions: {
+      EpisodeRefreshLookbackDays: 365,
+    },
+  }
+
+  for (const definition of Object.values(strmAssistantPluginSettingDefinitions)) {
+    setNestedValue(configuration, definition.path, definition.defaultValue)
+  }
+
+  return configuration
+}
+
+function normalizeStrmAssistantPluginConfiguration(configuration = {}) {
+  const nextConfiguration = {
+    ...createDefaultStrmAssistantPluginConfiguration(),
+    ...(isPlainObject(configuration) ? configuration : {}),
+  }
+
+  for (const definition of Object.values(strmAssistantPluginSettingDefinitions)) {
+    const currentValue = getNestedValue(nextConfiguration, definition.path)
+    setNestedValue(
+      nextConfiguration,
+      definition.path,
+      normalizeStrmAssistantPluginSettingValue(definition, currentValue),
+    )
+  }
+
+  return nextConfiguration
+}
+
+function getStrmAssistantPluginSettingValues(configuration = {}) {
+  const normalizedConfiguration = normalizeStrmAssistantPluginConfiguration(configuration)
+  const values = {}
+
+  for (const [settingId, definition] of Object.entries(strmAssistantPluginSettingDefinitions)) {
+    values[settingId] = normalizeStrmAssistantPluginSettingValue(
+      definition,
+      getNestedValue(normalizedConfiguration, definition.path),
+    )
+  }
+
+  return values
+}
+
+async function fetchEmbyPlugins(settings) {
+  const payload = await requestEmbyApi(settings, '/Plugins')
+
+  if (Array.isArray(payload)) {
+    return payload
+  }
+
+  if (Array.isArray(payload?.Items)) {
+    return payload.Items
+  }
+
+  return []
+}
+
+async function getStrmAssistantPluginInfo(settings) {
+  try {
+    const plugins = await fetchEmbyPlugins(settings)
+
+    return (
+      plugins.find((plugin) => {
+        const name = String(plugin?.Name ?? plugin?.name ?? '').toLowerCase()
+        const id = String(plugin?.Id ?? plugin?.id ?? '').toLowerCase()
+        const assembly = String(
+          plugin?.AssemblyFileName ?? plugin?.assemblyFileName ?? plugin?.FileName ?? '',
+        ).toLowerCase()
+
+        return (
+          name.includes('strm assistant') ||
+          name.includes('strmassistant') ||
+          id === '63c322b7-a371-41a3-b11f-04f8418b37d8' ||
+          assembly.includes('strmassistant')
+        )
+      }) ?? null
+    )
+  } catch {
+    return null
+  }
+}
+
+function getStrmAssistantPluginId(pluginInfo) {
+  return String(pluginInfo?.Id ?? pluginInfo?.id ?? '').trim()
+}
+
+function getStrmAssistantPluginConfigurationName(pluginInfo) {
+  return String(
+    pluginInfo?.ConfigurationFileName ??
+      pluginInfo?.configurationFileName ??
+      pluginInfo?.ConfigurationFilePath ??
+      pluginInfo?.configurationFilePath ??
+      '',
+  ).trim()
+}
+
+function resolveStrmAssistantPluginConfigurationFile(pluginInfo, detection = {}) {
+  const pluginDirectory = String(detection.pluginDirectory ?? '').trim()
+  const configurationName = getStrmAssistantPluginConfigurationName(pluginInfo)
+  const defaultConfigurationFile = pluginDirectory
+    ? path.join(pluginDirectory, 'configurations', 'Strm Assistant.json')
+    : ''
+
+  if (!pluginDirectory) {
+    return defaultConfigurationFile
+  }
+
+  if (!configurationName) {
+    return defaultConfigurationFile
+  }
+
+  const normalizedConfigurationName = configurationName.replace(/\\/g, '/')
+  const pluginDirectoryRoot = path.dirname(pluginDirectory)
+
+  if (normalizedConfigurationName.startsWith('/config/plugins/')) {
+    return path.join(
+      pluginDirectory,
+      normalizedConfigurationName.slice('/config/plugins/'.length),
+    )
+  }
+
+  if (normalizedConfigurationName === '/config/plugins') {
+    return defaultConfigurationFile
+  }
+
+  if (normalizedConfigurationName.startsWith('/config/')) {
+    return path.join(pluginDirectoryRoot, normalizedConfigurationName.slice('/config/'.length))
+  }
+
+  if (path.isAbsolute(configurationName)) {
+    return configurationName
+  }
+
+  return path.join(pluginDirectory, 'configurations', configurationName)
+}
+
+async function readJsonConfigFile(filePath) {
+  const content = await readFile(filePath, 'utf8')
+  return JSON.parse(content)
+}
+
+async function writeJsonConfigFile(filePath, payload) {
+  await mkdir(path.dirname(filePath), { recursive: true })
+  await writeFile(`${filePath}.tmp`, JSON.stringify(payload, null, 2), 'utf8')
+  await rename(`${filePath}.tmp`, filePath)
+}
+
+async function readStrmAssistantPluginConfigurationFromEmby(settings, pluginInfo) {
+  const pluginId = getStrmAssistantPluginId(pluginInfo)
+
+  if (!pluginId) {
+    return null
+  }
+
+  const payload = await requestEmbyApi(
+    settings,
+    `/Plugins/${encodeURIComponent(pluginId)}/Configuration`,
+  )
+
+  return isPlainObject(payload) ? payload : null
+}
+
+async function writeStrmAssistantPluginConfigurationToEmby(settings, pluginInfo, configuration) {
+  const pluginId = getStrmAssistantPluginId(pluginInfo)
+
+  if (!pluginId) {
+    throw new Error('Emby 插件没有返回配置接口 ID')
+  }
+
+  return requestEmbyApi(settings, `/Plugins/${encodeURIComponent(pluginId)}/Configuration`, {
+    body: JSON.stringify(configuration),
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    method: 'POST',
+  })
+}
+
+async function readStrmAssistantPluginSettings(baseUrl = '', providedSettings, providedDetection) {
+  const settings = providedSettings ?? (await readSettings(baseUrl))
+  const detection = providedDetection ?? (await detectEmbyPluginDirectory(baseUrl))
+  const pluginInfo = await getStrmAssistantPluginInfo(settings)
+  const configFile = resolveStrmAssistantPluginConfigurationFile(pluginInfo, detection)
+  let configuration
+  let source = 'defaults'
+  let syncError = ''
+
+  if (pluginInfo) {
+    try {
+      configuration = await readStrmAssistantPluginConfigurationFromEmby(settings, pluginInfo)
+
+      if (configuration) {
+        source = 'emby-api'
+      }
+    } catch (error) {
+      syncError = getErrorMessage(error)
+    }
+  }
+
+  if (!configuration && configFile) {
+    try {
+      if (await pathExists(configFile)) {
+        configuration = await readJsonConfigFile(configFile)
+        source = 'file'
+      }
+    } catch (error) {
+      syncError = [syncError, `读取插件配置文件失败：${getErrorMessage(error)}`]
+        .filter(Boolean)
+        .join('；')
+    }
+  }
+
+  const normalizedConfiguration = normalizeStrmAssistantPluginConfiguration(configuration)
+
+  return {
+    configFile,
+    configuration: normalizedConfiguration,
+    pluginId: getStrmAssistantPluginId(pluginInfo),
+    pluginName: String(pluginInfo?.Name ?? pluginInfo?.name ?? 'Strm Assistant'),
+    pluginVersion: String(pluginInfo?.Version ?? pluginInfo?.version ?? ''),
+    source,
+    syncError,
+    updatedAt: new Date().toISOString(),
+    values: getStrmAssistantPluginSettingValues(normalizedConfiguration),
+  }
+}
+
+async function updateStrmAssistantPluginSettings(values = {}, baseUrl = '') {
+  const settings = await readSettings(baseUrl)
+  const detection = await detectEmbyPluginDirectory(baseUrl)
+  const pluginInfo = await getStrmAssistantPluginInfo(settings)
+  const currentSettings = await readStrmAssistantPluginSettings(baseUrl, settings, detection)
+  const nextConfiguration = normalizeStrmAssistantPluginConfiguration(currentSettings.configuration)
+  const nextValues = isPlainObject(values?.values) ? values.values : values
+  let applied = false
+
+  for (const [settingId, value] of Object.entries(nextValues ?? {})) {
+    const definition = strmAssistantPluginSettingDefinitions[settingId]
+
+    if (!definition) {
+      continue
+    }
+
+    setNestedValue(
+      nextConfiguration,
+      definition.path,
+      normalizeStrmAssistantPluginSettingValue(definition, value),
+    )
+    applied = true
+  }
+
+  if (!applied) {
+    throw new Error('没有可同步的神医助手插件参数')
+  }
+
+  const configFile =
+    currentSettings.configFile || resolveStrmAssistantPluginConfigurationFile(pluginInfo, detection)
+
+  if (!configFile) {
+    throw new Error('未找到可写入的神医助手插件配置文件路径')
+  }
+
+  await writeJsonConfigFile(configFile, nextConfiguration)
+
+  let writeWarning = ''
+
+  if (pluginInfo) {
+    try {
+      await writeStrmAssistantPluginConfigurationToEmby(settings, pluginInfo, nextConfiguration)
+    } catch (error) {
+      writeWarning = `已写入插件配置文件，但 Emby 配置接口未接受即时刷新：${getErrorMessage(error)}`
+    }
+  } else {
+    writeWarning = '已写入插件配置文件，但当前未从 Emby 插件列表中识别到 Strm Assistant。'
+  }
+
+  const defaults = await getEmbyPluginDefaults(baseUrl)
+  const status = await getEmbyPluginStatus(baseUrl)
+
+  return {
+    ...defaults,
+    status: {
+      ...status,
+      pluginSettings: {
+        ...status.pluginSettings,
+        writeWarning,
+      },
+    },
+  }
+}
+
 async function fetchEmbyScheduledTasks(settings) {
   const payload = await requestEmbyApi(settings, '/ScheduledTasks')
 
@@ -2408,6 +3168,7 @@ function getEmbyTaskRunSnapshot(task, definition, previousSchedule = {}) {
   const resultStatus = String(lastResult?.Status ?? lastResult?.Result ?? '').toLowerCase()
   const resultAfterTrigger =
     Boolean(lastTriggeredAt && resultEndAt) && resultEndAt.getTime() >= lastTriggeredAt.getTime()
+  const resultRelevant = resultAfterTrigger || (!lastTriggeredAt && Boolean(resultEndAt))
   let runStatus = previousSchedule.runStatus || 'idle'
   let runProgress = previousSchedule.runProgress ?? 0
   let runMessage = previousSchedule.runMessage || '未执行'
@@ -2416,7 +3177,7 @@ function getEmbyTaskRunSnapshot(task, definition, previousSchedule = {}) {
     runStatus = 'running'
     runProgress = currentProgress
     runMessage = '正在执行'
-  } else if (resultAfterTrigger) {
+  } else if (resultRelevant) {
     if (resultStatus.includes('fail') || resultStatus.includes('error')) {
       runStatus = 'failed'
       runProgress = currentProgress
@@ -2437,13 +3198,168 @@ function getEmbyTaskRunSnapshot(task, definition, previousSchedule = {}) {
     embyTaskName: String(task?.Name ?? definition.taskName),
     embyTaskState: state || 'Unknown',
     lastError: runStatus === 'failed' ? String(lastResult?.ErrorMessage ?? '') : '',
-    lastFinishedAt: resultAfterTrigger && resultEndAt ? resultEndAt.toISOString() : '',
+    lastFinishedAt: resultRelevant && resultEndAt ? resultEndAt.toISOString() : '',
     runMessage,
     runProgress,
     runStatus,
     runUpdatedAt: new Date().toISOString(),
     taskId: definition.taskId,
     taskName: definition.taskName,
+  }
+}
+
+function getEmbyTaskTriggers(task) {
+  for (const key of ['Triggers', 'triggers', 'TriggerInfos', 'triggerInfos']) {
+    if (Array.isArray(task?.[key])) {
+      return task[key]
+    }
+  }
+
+  return []
+}
+
+function getEmbyTriggerIntervalHours(trigger) {
+  const rawCandidates = [
+    trigger?.IntervalHours,
+    trigger?.intervalHours,
+    trigger?.Hours,
+    trigger?.hours,
+  ]
+  const hourValue = rawCandidates.map((value) => Number(value)).find((value) => value > 0)
+
+  if (hourValue) {
+    return Math.max(1, Math.round(hourValue))
+  }
+
+  const minuteValue = [trigger?.IntervalMinutes, trigger?.intervalMinutes, trigger?.Minutes]
+    .map((value) => Number(value))
+    .find((value) => value > 0)
+
+  if (minuteValue) {
+    return Math.max(1, Math.round(minuteValue / 60))
+  }
+
+  const secondValue = [trigger?.IntervalSeconds, trigger?.intervalSeconds, trigger?.Seconds]
+    .map((value) => Number(value))
+    .find((value) => value > 0)
+
+  if (secondValue) {
+    return Math.max(1, Math.round(secondValue / 3600))
+  }
+
+  const ticksValue = [trigger?.IntervalTicks, trigger?.intervalTicks, trigger?.Ticks]
+    .map((value) => Number(value))
+    .find((value) => value > 0)
+
+  if (ticksValue) {
+    return Math.max(1, Math.round(ticksValue / 36_000_000_000))
+  }
+
+  const typeText = String(trigger?.Type ?? trigger?.type ?? trigger?.Name ?? '').toLowerCase()
+
+  if (typeText.includes('daily')) {
+    return 24
+  }
+
+  if (typeText.includes('weekly')) {
+    return 168
+  }
+
+  return undefined
+}
+
+function getEmbyTaskExecutionSnapshot(task, previousSchedule = {}) {
+  const triggers = getEmbyTaskTriggers(task)
+  const enabledTriggers = triggers.filter((trigger) => trigger?.Enabled !== false)
+  const embyScheduleEnabled = enabledTriggers.length > 0
+  const intervalHours =
+    enabledTriggers
+      .map(getEmbyTriggerIntervalHours)
+      .filter((value) => Number.isFinite(value) && value > 0)
+      .sort((left, right) => left - right)[0] ??
+    previousSchedule.intervalHours ??
+    1
+  const previousModes =
+    Array.isArray(previousSchedule.modes) && previousSchedule.modes.length > 0
+      ? previousSchedule.modes
+      : previousSchedule.mode
+        ? [previousSchedule.mode]
+        : []
+  const modes = [...new Set([...previousModes, ...(embyScheduleEnabled ? ['hourly'] : [])])]
+
+  return {
+    embyScheduleEnabled,
+    embyTriggerCount: enabledTriggers.length,
+    enabled: previousSchedule.enabled === true || embyScheduleEnabled,
+    intervalHours,
+    mode: modes[0] || 'hourly',
+    modes: modes.length > 0 ? modes : ['hourly'],
+  }
+}
+
+function getAllStrmAssistantTaskDefinitions() {
+  return Object.keys(strmAssistantTaskClassById).map((taskId) =>
+    getStrmAssistantTaskDefinition(taskId),
+  )
+}
+
+async function syncStrmAssistantTaskSchedulesFromEmby(baseUrl = '', providedSettings) {
+  const settings = providedSettings ?? (await readSettings(baseUrl))
+  const previousSchedules = settings.strmAssistant?.taskSchedules ?? {}
+
+  try {
+    const embyTasks = await fetchEmbyScheduledTasks(settings)
+    const taskSchedules = { ...previousSchedules }
+    let changed = false
+
+    for (const definition of getAllStrmAssistantTaskDefinitions()) {
+      const previousSchedule = taskSchedules[definition.taskId] ?? {}
+      const embyTask = findStrmAssistantScheduledTask(
+        embyTasks,
+        definition,
+        previousSchedule.embyTaskId,
+      )
+
+      if (!embyTask) {
+        continue
+      }
+
+      const nextSchedule = {
+        enabled: previousSchedule.enabled === true,
+        intervalHours: previousSchedule.intervalHours || 1,
+        mode: previousSchedule.mode || 'hourly',
+        modes:
+          Array.isArray(previousSchedule.modes) && previousSchedule.modes.length > 0
+            ? previousSchedule.modes
+            : ['hourly'],
+        taskId: definition.taskId,
+        taskName: previousSchedule.taskName || definition.taskName,
+        updatedAt: previousSchedule.updatedAt || new Date().toISOString(),
+        ...previousSchedule,
+        ...getEmbyTaskExecutionSnapshot(embyTask, previousSchedule),
+        ...getEmbyTaskRunSnapshot(embyTask, definition, previousSchedule),
+      }
+
+      if (JSON.stringify(taskSchedules[definition.taskId] ?? {}) !== JSON.stringify(nextSchedule)) {
+        changed = true
+      }
+
+      taskSchedules[definition.taskId] = nextSchedule
+    }
+
+    if (changed) {
+      await updateSettingsSection('strmAssistant', { taskSchedules }, baseUrl)
+    }
+
+    return {
+      taskSchedules,
+      taskSyncError: '',
+    }
+  } catch (error) {
+    return {
+      taskSchedules: previousSchedules,
+      taskSyncError: getErrorMessage(error),
+    }
   }
 }
 
@@ -2927,50 +3843,232 @@ async function createStrmTargetUrl(storage, entryPath, context = {}) {
   return createStrmUrl(storage, entryPath, context)
 }
 
-async function collectMediaEntries(storage, scanPath, logLines, strmSettings) {
-  const pendingDirectories = [scanPath || '/']
-  const mediaEntries = []
+async function generateStrmForEntry({
+  entry,
+  outputDirectory,
+  settings,
+  storage,
+  strmIndexEntries,
+  strmSettings,
+  strmUrlContext,
+  task,
+}) {
+  const relativePath = getEntryRelativePath(storage, task.path, entry)
+  const outputFile = getOutputFilePath(outputDirectory, relativePath)
+  const sourceUrl = await createStrmTargetUrl(storage, entry.path, strmUrlContext)
+  const indexEntry = createStrmIndexEntry(
+    task,
+    storage,
+    strmSettings,
+    settings,
+    outputFile,
+    relativePath,
+    entry.path,
+    sourceUrl,
+  )
+  const relativeOutputFile = path.relative(outputDirectory, outputFile)
+
+  if (task.incremental && (await pathExists(outputFile))) {
+    const currentSourceUrl = await readStrmTarget(outputFile)
+
+    if (currentSourceUrl === sourceUrl) {
+      strmIndexEntries.push(indexEntry)
+
+      return {
+        outputFile,
+        relativeOutputFile,
+        status: 'skipped',
+      }
+    }
+  }
+
+  await mkdir(path.dirname(outputFile), { recursive: true })
+  await writeFile(outputFile, `${sourceUrl}\n`, 'utf8')
+  strmIndexEntries.push(indexEntry)
+
+  return {
+    outputFile,
+    relativeOutputFile,
+    status: 'generated',
+  }
+}
+
+async function scanAndGenerateStrmEntries({
+  logLines,
+  outputDirectory,
+  settings,
+  storage,
+  strmSettings,
+  task,
+}) {
+  const pendingDirectories = [task.path || '/']
+  const scanThreadCount = normalizeStrmThreadCount(strmSettings?.threadCount)
+  const strmIndexEntries = []
+  const strmUrlContext = {}
+  const waiters = []
+  let activeDirectories = 0
+  let claimedDirectories = 0
   let scannedDirectories = 0
   let failedDirectories = 0
+  let mediaFiles = 0
+  let generated = 0
+  let skipped = 0
+  let failed = 0
 
-  while (pendingDirectories.length > 0) {
-    if (
-      scannedDirectories >= scanLimits.directories ||
-      mediaEntries.length >= scanLimits.mediaFiles
-    ) {
-      logLines.push('达到扫描上限，已停止继续递归。')
-      break
+  logLines.push('>>> 开始扫描并生成')
+
+  function wakeWorkers() {
+    while (waiters.length > 0) {
+      waiters.shift()?.()
     }
+  }
 
-    const currentPath = pendingDirectories.shift()
+  function waitForDirectory() {
+    return new Promise((resolve) => {
+      waiters.push(resolve)
+    })
+  }
+
+  function shouldStopScanning() {
+    return (
+      claimedDirectories >= scanLimits.directories ||
+      mediaFiles >= scanLimits.mediaFiles
+    )
+  }
+
+  async function takeDirectory() {
+    while (true) {
+      if (shouldStopScanning()) {
+        return undefined
+      }
+
+      const currentPath = pendingDirectories.shift()
+
+      if (currentPath) {
+        claimedDirectories += 1
+        activeDirectories += 1
+        return currentPath
+      }
+
+      if (activeDirectories === 0) {
+        return undefined
+      }
+
+      await waitForDirectory()
+    }
+  }
+
+  async function generateMediaEntry(entry) {
+    mediaFiles += 1
 
     try {
-      const result = await listStorageEntries(storage, currentPath)
-      scannedDirectories += 1
-      logLines.push(`读取目录: ${result.path}`)
+      const result = await generateStrmForEntry({
+        entry,
+        outputDirectory,
+        settings,
+        storage,
+        strmIndexEntries,
+        strmSettings,
+        strmUrlContext,
+        task,
+      })
 
-      for (const entry of result.entries) {
-        if (entry.kind === 'folder') {
-          pendingDirectories.push(entry.path)
-        } else if (isMediaEntry(entry, strmSettings)) {
-          mediaEntries.push(entry)
-
-          if (mediaEntries.length >= scanLimits.mediaFiles) {
-            break
-          }
-        }
+      if (result.status === 'skipped') {
+        skipped += 1
+        logLines.push(`跳过已存在: ${result.relativeOutputFile}`)
+      } else {
+        generated += 1
+        logLines.push(`生成成功: ${result.relativeOutputFile}`)
       }
     } catch (error) {
-      failedDirectories += 1
-      logLines.push(`目录读取失败: ${currentPath} - ${getErrorMessage(error)}`)
+      failed += 1
+      logLines.push(`生成失败: ${entry.path} - ${getErrorMessage(error)}`)
     }
+  }
+
+  async function scanWorker() {
+    while (true) {
+      const currentPath = await takeDirectory()
+
+      if (!currentPath) {
+        return
+      }
+
+      try {
+        const result = await listStorageEntries(storage, currentPath)
+        const mediaEntries = []
+        scannedDirectories += 1
+        logLines.push(`读取目录: ${result.path}`)
+
+        for (const entry of result.entries) {
+          if (entry.kind === 'folder') {
+            pendingDirectories.push(entry.path)
+          } else if (isMediaEntry(entry, strmSettings)) {
+            mediaEntries.push(entry)
+          }
+        }
+
+        wakeWorkers()
+
+        for (const entry of mediaEntries) {
+          if (mediaFiles >= scanLimits.mediaFiles) {
+            break
+          }
+
+          await generateMediaEntry(entry)
+        }
+      } catch (error) {
+        failedDirectories += 1
+        logLines.push(`目录读取失败: ${currentPath} - ${getErrorMessage(error)}`)
+      } finally {
+        activeDirectories -= 1
+        wakeWorkers()
+      }
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: scanThreadCount }, () => {
+      return scanWorker()
+    })
+  )
+
+  if (claimedDirectories >= scanLimits.directories || mediaFiles >= scanLimits.mediaFiles) {
+    logLines.push('达到扫描上限，已停止继续递归。')
   }
 
   return {
     failedDirectories,
-    mediaEntries,
+    failed,
+    generated,
+    mediaFiles,
     scannedDirectories,
+    skipped,
+    strmIndexEntries,
   }
+}
+
+function getTaskRunCompletionStatus(result = {}) {
+  const failed = Math.max(0, Number(result.failed ?? 0) || 0)
+  const failedDirectories = Math.max(0, Number(result.failedDirectories ?? 0) || 0)
+  const generated = Math.max(0, Number(result.generated ?? 0) || 0)
+  const skipped = Math.max(0, Number(result.skipped ?? 0) || 0)
+  const mediaFiles = Math.max(0, Number(result.mediaFiles ?? 0) || 0)
+  const completedMediaFiles = generated + skipped
+
+  if (failed === 0 && failedDirectories === 0) {
+    return 'succeeded'
+  }
+
+  if (generated === 0 && skipped > 0 && failedDirectories === 0) {
+    return 'succeeded'
+  }
+
+  if (completedMediaFiles > 0 || mediaFiles > failed) {
+    return 'partial'
+  }
+
+  return 'failed'
 }
 
 async function executeTask(task, storage, strmSettings, settings = {}) {
@@ -2990,6 +4088,7 @@ async function executeTask(task, storage, strmSettings, settings = {}) {
     `STRM 中转: ${shouldUseStrmRedirect(storage) ? 'true' : 'false'}`,
     `媒体后缀: ${strmSettings.mediaExtensions}`,
     `媒体大小阈值: ${strmSettings.minMediaSizeMb} MB`,
+    `扫描线程数量: ${normalizeStrmThreadCount(strmSettings.threadCount)}`,
     '------------------------------------------------------------',
   ])
 
@@ -3008,76 +4107,22 @@ async function executeTask(task, storage, strmSettings, settings = {}) {
     }
   }
 
-  const { failedDirectories, mediaEntries, scannedDirectories } = await collectMediaEntries(
-    storage,
-    task.path,
+  let {
+    failedDirectories,
+    failed,
+    generated,
+    mediaFiles,
+    scannedDirectories,
+    skipped,
+    strmIndexEntries,
+  } = await scanAndGenerateStrmEntries({
     logLines,
+    outputDirectory,
+    settings,
+    storage,
     strmSettings,
-  )
-
-  let generated = 0
-  let skipped = 0
-  let failed = 0
-  const strmIndexEntries = []
-  const strmUrlContext = {}
-
-  logLines.push(
-    `扫描完成，共读取 ${scannedDirectories} 个目录，发现 ${mediaEntries.length} 个媒体文件。`,
-  )
-  logLines.push('>>> 开始生成')
-
-  for (const entry of mediaEntries) {
-    const relativePath = getEntryRelativePath(storage, task.path, entry)
-    const outputFile = getOutputFilePath(outputDirectory, relativePath)
-
-    try {
-      const sourceUrl = await createStrmTargetUrl(storage, entry.path, strmUrlContext)
-
-      if (task.incremental && (await pathExists(outputFile))) {
-        const currentSourceUrl = await readStrmTarget(outputFile)
-
-        if (currentSourceUrl === sourceUrl) {
-          skipped += 1
-          strmIndexEntries.push(
-            createStrmIndexEntry(
-              task,
-              storage,
-              strmSettings,
-              settings,
-              outputFile,
-              relativePath,
-              entry.path,
-              sourceUrl,
-            ),
-          )
-          continue
-        }
-      }
-
-      await mkdir(path.dirname(outputFile), { recursive: true })
-      await writeFile(outputFile, `${sourceUrl}\n`, 'utf8')
-      strmIndexEntries.push(
-        createStrmIndexEntry(
-          task,
-          storage,
-          strmSettings,
-          settings,
-          outputFile,
-          relativePath,
-          entry.path,
-          sourceUrl,
-        ),
-      )
-      generated += 1
-
-      if (generated <= 50) {
-        logLines.push(`生成: ${path.relative(outputDirectory, outputFile)}`)
-      }
-    } catch (error) {
-      failed += 1
-      logLines.push(`生成失败: ${entry.path} - ${getErrorMessage(error)}`)
-    }
-  }
+    task,
+  })
 
   try {
     await upsertStrmIndexEntries(strmIndexEntries)
@@ -3088,13 +4133,21 @@ async function executeTask(task, storage, strmSettings, settings = {}) {
   }
 
   const finishedAt = new Date()
-  const ok = failed === 0 && failedDirectories === 0
+  const status = getTaskRunCompletionStatus({
+    failed,
+    failedDirectories,
+    generated,
+    mediaFiles,
+    skipped,
+  })
+  const ok = status === 'succeeded'
+  const partial = status === 'partial'
 
   logLines.push(
-    `生成完成，共发现 ${mediaEntries.length} 个媒体文件，生成 ${generated} 个，跳过 ${skipped} 个，失败 ${failed} 个，目录读取失败 ${failedDirectories} 个。`,
+    `生成完成，共发现 ${mediaFiles} 个媒体文件，生成 ${generated} 个，跳过 ${skipped} 个，失败 ${failed} 个，目录读取失败 ${failedDirectories} 个。`,
   )
   logLines.push(`${formatLocalDateTime(finishedAt)} 任务完成`)
-  logLines.finish(ok ? 'idle' : 'failed')
+  logLines.finish(status)
 
   return {
     log: logLines.text(),
@@ -3103,12 +4156,14 @@ async function executeTask(task, storage, strmSettings, settings = {}) {
       failedDirectories,
       finishedAt: finishedAt.toISOString(),
       generated,
-      mediaFiles: mediaEntries.length,
+      mediaFiles,
       ok,
       outputPath,
+      partial,
       scannedDirectories,
       skipped,
       startedAt: startedAt.toISOString(),
+      status,
     },
   }
 }
@@ -3177,7 +4232,9 @@ async function runTask(taskId) {
     throw error
   }
 
-  const nextStatus = execution.result.ok ? 'idle' : 'failed'
+  const nextStatus = normalizeTaskStatus(
+    execution.result.status ?? (execution.result.ok ? 'succeeded' : 'failed'),
+  )
   const updatedTask = await saveTaskRunState(taskId, {
     lastLog: execution.log,
     lastResult: execution.result,
@@ -3193,7 +4250,7 @@ async function runTask(taskId) {
     updatedAt: execution.result.finishedAt,
   })
 
-  if (execution.result.ok) {
+  if (nextStatus !== 'failed') {
     const triggeredSchedules = await markStrmAssistantTasksTriggeredAfterStrm(
       task,
       execution.result,
@@ -5071,6 +6128,59 @@ const server = createServer(async (request, response) => {
     return
   }
 
+  try {
+    if (await requireApiAccessIfExternal(request, response)) {
+      return
+    }
+  } catch (error) {
+    sendJson(response, 500, {
+      ok: false,
+      title: 'API 秘钥校验失败',
+      message: getErrorMessage(error),
+    })
+    return
+  }
+
+  if (request.method === 'GET' && request.url === '/api/access') {
+    try {
+      sendJson(response, 200, await ensureApiAccessKey(getRequestOrigin(request)))
+    } catch (error) {
+      sendJson(response, 500, {
+        ok: false,
+        title: '读取 API 秘钥失败',
+        message: getErrorMessage(error),
+      })
+    }
+    return
+  }
+
+  if (request.method === 'PUT' && request.url === '/api/access') {
+    try {
+      const values = await readJsonBody(request)
+      sendJson(response, 200, await updateApiAccessSettings(values, getRequestOrigin(request)))
+    } catch (error) {
+      sendJson(response, 400, {
+        ok: false,
+        title: '保存 API 接口设置失败',
+        message: getErrorMessage(error),
+      })
+    }
+    return
+  }
+
+  if (request.method === 'POST' && request.url === '/api/access/regenerate') {
+    try {
+      sendJson(response, 200, await regenerateApiAccessKey(getRequestOrigin(request)))
+    } catch (error) {
+      sendJson(response, 400, {
+        ok: false,
+        title: '重置 API 秘钥失败',
+        message: getErrorMessage(error),
+      })
+    }
+    return
+  }
+
   if (request.method === 'GET' && request.url === '/api/settings') {
     try {
       const settings = await readSettings(getRequestOrigin(request))
@@ -5117,6 +6227,24 @@ const server = createServer(async (request, response) => {
       sendJson(response, 400, {
         ok: false,
         title: '保存 Emby 插件目录失败',
+        message: getErrorMessage(error),
+      })
+    }
+    return
+  }
+
+  if (request.method === 'PUT' && request.url === '/api/strm-assistant/plugin-settings') {
+    try {
+      const values = await readJsonBody(request)
+      sendJson(
+        response,
+        200,
+        await updateStrmAssistantPluginSettings(values, getRequestOrigin(request)),
+      )
+    } catch (error) {
+      sendJson(response, 400, {
+        ok: false,
+        title: '同步神医助手插件参数失败',
         message: getErrorMessage(error),
       })
     }
@@ -5188,12 +6316,20 @@ const server = createServer(async (request, response) => {
 
   if (request.method === 'POST' && request.url === '/api/strm-assistant/start') {
     try {
-      sendJson(response, 200, await startStrmAssistant(getRequestOrigin(request)))
+      const values = await readJsonBody(request)
+      sendJson(
+        response,
+        200,
+        await startStrmAssistant(getRequestOrigin(request), {
+          forceReplace: values?.forceReplace === true,
+        }),
+      )
     } catch (error) {
-      sendJson(response, 400, {
+      sendJson(response, error?.statusCode ?? 400, {
         ok: false,
-        title: '启动神医助手失败',
+        title: error?.title ?? '启动神医助手失败',
         message: getErrorMessage(error),
+        replacementRequired: error?.replacementRequired === true,
       })
     }
     return
@@ -5201,12 +6337,20 @@ const server = createServer(async (request, response) => {
 
   if (request.method === 'POST' && request.url === '/api/emby-plugin/install') {
     try {
-      sendJson(response, 200, await installEmbyPlugin(getRequestOrigin(request)))
+      const values = await readJsonBody(request)
+      sendJson(
+        response,
+        200,
+        await installEmbyPlugin(getRequestOrigin(request), {
+          forceReplace: values?.forceReplace === true,
+        }),
+      )
     } catch (error) {
-      sendJson(response, 400, {
+      sendJson(response, error?.statusCode ?? 400, {
         ok: false,
-        title: '安装 Emby 插件失败',
+        title: error?.title ?? '安装 Emby 插件失败',
         message: getErrorMessage(error),
+        replacementRequired: error?.replacementRequired === true,
       })
     }
     return
@@ -5494,6 +6638,12 @@ const server = createServer(async (request, response) => {
     message: '接口不存在',
   })
 })
+
+try {
+  await ensureApiAccessKey()
+} catch (error) {
+  console.error(`OpenStrmBridge API access key initialization failed: ${getErrorMessage(error)}`)
+}
 
 server.listen(port, host, () => {
   console.log(`OpenStrmBridge storage check server listening on http://${host}:${port}`)

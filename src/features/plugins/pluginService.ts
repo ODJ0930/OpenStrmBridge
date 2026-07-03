@@ -1,6 +1,7 @@
 import { getApiBaseUrl } from '../../shared/config/runtimeConfig'
 import type {
   StrmAssistantDefaults,
+  StrmAssistantPluginSettingValue,
   StrmAssistantStartResult,
   StrmAssistantStatus,
   StrmAssistantTaskRunResult,
@@ -13,8 +14,11 @@ export interface StrmAssistantService {
   getTaskRun(taskId: string): Promise<StrmAssistantTaskRunResult>
   runTaskOnce(taskId: string): Promise<StrmAssistantTaskRunResult>
   setPluginDirectory(pluginDirectory: string): Promise<StrmAssistantDefaults>
+  setPluginSettings(
+    values: Record<string, StrmAssistantPluginSettingValue>,
+  ): Promise<StrmAssistantDefaults>
   setTaskSchedule(schedule: StrmAssistantTaskSchedule): Promise<StrmAssistantDefaults>
-  start(): Promise<StrmAssistantStartResult>
+  start(options?: { forceReplace?: boolean }): Promise<StrmAssistantStartResult>
 }
 
 const backendBaseUrl = getApiBaseUrl()
@@ -23,7 +27,9 @@ let cachedDefaults: StrmAssistantDefaults | null = null
 let pendingDefaults: Promise<StrmAssistantDefaults> | null = null
 
 async function readJsonResponse<T>(response: Response) {
-  const payload = (await response.json()) as T | { message?: string }
+  const payload = (await response.json()) as
+    | T
+    | { message?: string; replacementRequired?: boolean; title?: string }
 
   if (!response.ok) {
     if (response.status === 404) {
@@ -35,7 +41,16 @@ async function readJsonResponse<T>(response: Response) {
         ? payload.message
         : undefined
 
-    throw new Error(message || `HTTP ${response.status}`)
+    const error = new Error(message || `HTTP ${response.status}`)
+
+    if (typeof payload === 'object' && payload !== null) {
+      Object.assign(error, {
+        replacementRequired: 'replacementRequired' in payload ? payload.replacementRequired : false,
+        title: 'title' in payload ? payload.title : undefined,
+      })
+    }
+
+    throw error
   }
 
   return payload as T
@@ -100,6 +115,17 @@ export const strmAssistantService: StrmAssistantService = {
 
     return cacheDefaults(await readJsonResponse<StrmAssistantDefaults>(response))
   },
+  async setPluginSettings(values) {
+    const response = await fetch(`${strmAssistantUrl}/plugin-settings`, {
+      body: JSON.stringify({ values }),
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      method: 'PUT',
+    })
+
+    return cacheDefaults(await readJsonResponse<StrmAssistantDefaults>(response))
+  },
   async getTaskRun(taskId) {
     const response = await fetch(`${strmAssistantUrl}/task-runs/${encodeURIComponent(taskId)}`)
     const result = await readJsonResponse<StrmAssistantTaskRunResult>(response)
@@ -118,8 +144,12 @@ export const strmAssistantService: StrmAssistantService = {
 
     return result
   },
-  async start() {
+  async start(options = {}) {
     const response = await fetch(`${strmAssistantUrl}/start`, {
+      body: JSON.stringify({ forceReplace: options.forceReplace === true }),
+      headers: {
+        'Content-Type': 'application/json',
+      },
       method: 'POST',
     })
 

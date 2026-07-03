@@ -1,4 +1,4 @@
-export type TaskStatus = 'idle' | 'running' | 'failed'
+export type TaskStatus = 'idle' | 'running' | 'failed' | 'partial' | 'succeeded'
 export type StorageAccessMethod = 'openlist' | 'webdav' | 'local'
 export type StorageStatus = 'connected' | 'unchecked' | 'failed'
 export type FileEntryKind = 'folder' | 'file'
@@ -23,6 +23,8 @@ export interface TaskItem {
 
 export interface TaskRunResult {
   ok: boolean
+  partial?: boolean
+  status?: TaskStatus
   scannedDirectories: number
   mediaFiles: number
   generated: number
@@ -135,13 +137,29 @@ export interface StrmAssistantCapabilities {
   source: string
 }
 
+export type StrmAssistantPluginSettingValue = boolean | number
+
+export interface StrmAssistantPluginSettings {
+  configFile?: string
+  pluginId?: string
+  pluginName?: string
+  pluginVersion?: string
+  source: string
+  syncError?: string
+  updatedAt?: string
+  values: Record<string, StrmAssistantPluginSettingValue>
+  writeWarning?: string
+}
+
 export type StrmAssistantTaskScheduleMode = 'hourly' | 'after-strm'
 export type StrmAssistantTaskRunStatus = 'idle' | 'queued' | 'running' | 'succeeded' | 'failed'
 
 export interface StrmAssistantTaskSchedule {
+  embyScheduleEnabled?: boolean
   embyTaskId?: string
   embyTaskName?: string
   embyTaskState?: string
+  embyTriggerCount?: number
   enabled: boolean
   intervalHours: number
   lastError?: string
@@ -165,9 +183,13 @@ export interface StrmAssistantStatus extends StrmAssistantValues {
   capabilities: StrmAssistantCapabilities
   detectionSource: string
   foundPluginDirectory: boolean
+  hasExistingPluginFile?: boolean
   installed: boolean
   pluginFileName: string
+  pluginSettings?: StrmAssistantPluginSettings
+  replacementRequired?: boolean
   sourceExists: boolean
+  taskSyncError?: string
   taskSchedules: Record<string, StrmAssistantTaskSchedule>
   targetFile: string
 }
@@ -199,7 +221,15 @@ export interface StrmSettings {
   cloudNamingMode: string
   signEnabled: boolean
   signSecret: string
+  threadCount: number
   previewUrl: string
+}
+
+export interface ApiAccessSettings {
+  createdAt: string
+  enabled: boolean
+  key: string
+  updatedAt: string
 }
 
 export interface Proxy302Settings {

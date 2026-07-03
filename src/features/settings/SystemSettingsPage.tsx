@@ -153,6 +153,17 @@ function StrmSettingsTab() {
         </Space.Compact>
       </Form.Item>
       <Form.Item
+        extra="控制并发读取目录的数量，1 表示按目录顺序扫描；扫描到媒体文件后仍会立即生成 STRM。建议根据 OpenList / WebDAV 接口承受能力设置。"
+        label="扫描线程数量"
+      >
+        <Space.Compact block>
+          <Form.Item name="threadCount" noStyle>
+            <InputNumber min={1} max={64} precision={0} style={{ width: '100%' }} />
+          </Form.Item>
+          <Button disabled>线程</Button>
+        </Space.Compact>
+      </Form.Item>
+      <Form.Item
         extra="多个后缀用逗号分隔，这些文件将直接复制到生成目录"
         label="复制到本地的文件后缀"
         name="sidecarExtensions"
