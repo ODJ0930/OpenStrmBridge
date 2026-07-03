@@ -2341,7 +2341,7 @@ async function getEmbyPluginStatus(baseUrl = '') {
     }
   }
 
-  const installed = hasExistingPluginFile && !replacementRequired
+  const installed = hasExistingPluginFile
   const capabilities = await getStrmAssistantCapabilities(sourceFile, installed)
   const pluginSettings = await readStrmAssistantPluginSettings(baseUrl, settings, detection)
   const { taskSchedules, taskSyncError } = await syncStrmAssistantTaskSchedulesFromEmby(

@@ -700,11 +700,17 @@ export function PluginManagementPage() {
     >
       <div className="summary-grid">
         <StatCard
-          detail={installed ? '插件已复制并可用' : '等待启动'}
+          detail={
+            status?.replacementRequired
+              ? '已检测到同名插件，可确认替换'
+              : installed
+                ? '插件已复制并可用'
+                : '等待启动'
+          }
           icon={installed ? 'check' : 'plug'}
           title="安装状态"
-          tone={installed ? 'green' : 'amber'}
-          value={installed ? '已安装' : '未安装'}
+          tone={status?.replacementRequired ? 'amber' : installed ? 'green' : 'amber'}
+          value={installed ? (status?.replacementRequired ? '已存在' : '已安装') : '未安装'}
         />
         <StatCard
           detail={directoryTagText}
@@ -744,7 +750,7 @@ export function PluginManagementPage() {
           </div>
           <Switch
             checked={installed || starting}
-            checkedChildren="已启动"
+            checkedChildren={status?.replacementRequired ? '已存在' : '已启动'}
             className="strm-assistant-start-switch"
             disabled={loadingStatus}
             loading={starting}
@@ -755,8 +761,8 @@ export function PluginManagementPage() {
         <div className="strm-assistant-detection">
           <div className="strm-assistant-metric">
             <span>安装状态</span>
-            <Tag color={installed ? 'success' : status?.replacementRequired ? 'warning' : undefined}>
-              {installed ? '已安装' : status?.replacementRequired ? '需确认替换' : '未安装'}
+            <Tag color={status?.replacementRequired ? 'warning' : installed ? 'success' : undefined}>
+              {status?.replacementRequired ? '需确认替换' : installed ? '已安装' : '未安装'}
             </Tag>
           </div>
           <div className="strm-assistant-metric">
@@ -789,6 +795,11 @@ export function PluginManagementPage() {
 
         {status?.replacementRequired ? (
           <Alert
+            action={
+              <Button danger loading={starting} size="small" onClick={() => void handleStart(true)}>
+                替换并启动
+              </Button>
+            }
             className="strm-assistant-alert"
             message="检测到已有同名插件"
             showIcon
