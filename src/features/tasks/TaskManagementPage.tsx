@@ -31,6 +31,7 @@ interface TaskFormValues {
   storageId: string
   path: string
   schedule: string
+  aiRenameBeforeStrm: boolean
   directoryTimeCheck: boolean
   incremental: boolean
   preRefreshOpenListCache: boolean
@@ -41,12 +42,15 @@ const defaultTaskValues: TaskFormValues = {
   storageId: '',
   path: '/',
   schedule: '*/5 * * * *',
+  aiRenameBeforeStrm: false,
   directoryTimeCheck: true,
   incremental: true,
   preRefreshOpenListCache: false,
 }
 
 interface LegacyTaskFields {
+  aiRenameBeforeStrm?: boolean
+  aiRenameFirst?: boolean
   cron?: string
   cronExpression?: string
   crontab?: string
@@ -57,6 +61,7 @@ interface LegacyTaskFields {
   name?: string
   path?: string
   preRefreshAlistCache?: boolean
+  preAiRename?: boolean
   preRefreshOpenlistCache?: boolean
   refreshOpenListCache?: boolean
   scanPath?: string
@@ -171,6 +176,12 @@ function taskToFormValues(task: TaskItem, storages: StorageItem[] = []): TaskFor
       legacyTask.crontab,
       legacyTask.cronExpression,
     ),
+    aiRenameBeforeStrm: firstBoolean(
+      defaultTaskValues.aiRenameBeforeStrm,
+      task.aiRenameBeforeStrm,
+      legacyTask.aiRenameFirst,
+      legacyTask.preAiRename,
+    ),
     directoryTimeCheck: firstBoolean(
       defaultTaskValues.directoryTimeCheck,
       task.directoryTimeCheck,
@@ -211,6 +222,7 @@ function createTaskFromValues(
     schedule: values.schedule.trim() || '*/5 * * * *',
     nextRun: editingTask?.nextRun ?? '手动运行',
     status: editingTask?.status ?? 'idle',
+    aiRenameBeforeStrm: values.aiRenameBeforeStrm === true,
     directoryTimeCheck: values.directoryTimeCheck !== false,
     incremental: values.incremental !== false,
     preRefreshOpenListCache:
@@ -631,14 +643,18 @@ export function TaskManagementPage() {
       setTasks((current) => updateTaskList(current, response.task))
       setLogContent(response.task.lastLog ?? '')
       setLogStatus(response.task.status)
+      const aiRenameSummary =
+        response.result.aiRenameStatus && response.result.aiRenameStatus !== 'skipped'
+          ? `，AI 提交 ${response.result.aiRenameSubmittedGroups ?? 0} 个目录，增量跳过 ${response.result.aiRenameUnchangedGroups ?? 0} 个目录`
+          : ''
 
       if (response.result.status === 'partial' || response.result.partial) {
         message.warning(
-          `${task.name} 部分完成：生成 ${response.result.generated} 个，跳过 ${response.result.skipped} 个，清理旧 STRM ${response.result.cleanupDeleted ?? 0} 个，失败 ${response.result.failed} 个，请查看日志`,
+          `${task.name} 部分完成：生成 ${response.result.generated} 个，跳过 ${response.result.skipped} 个，清理旧 STRM ${response.result.cleanupDeleted ?? 0} 个，失败 ${response.result.failed} 个${aiRenameSummary}，请查看日志`,
         )
       } else if (response.result.ok) {
         message.success(
-          `${task.name} 已生成 ${response.result.generated} 个 STRM，跳过 ${response.result.skipped} 个，清理旧 STRM ${response.result.cleanupDeleted ?? 0} 个`,
+          `${task.name} 已生成 ${response.result.generated} 个 STRM，跳过 ${response.result.skipped} 个，清理旧 STRM ${response.result.cleanupDeleted ?? 0} 个${aiRenameSummary}`,
         )
       } else {
         message.warning(`${task.name} 运行完成，但存在失败项，请查看日志`)
@@ -749,6 +765,16 @@ export function TaskManagementPage() {
       title: '定时',
       dataIndex: 'schedule',
       width: 150,
+    },
+    {
+      title: 'AI 预处理',
+      dataIndex: 'aiRenameBeforeStrm',
+      width: 110,
+      render: (enabled: boolean) => (
+        <span className={enabled ? 'status-pill status-pill-info' : 'status-pill'}>
+          {enabled ? '已开启' : '关闭'}
+        </span>
+      ),
     },
     {
       title: '下次运行',
@@ -863,7 +889,7 @@ export function TaskManagementPage() {
           locale={{ emptyText: '暂无任务，请先添加任务并选择一个已配置的存储' }}
           pagination={false}
           rowKey="id"
-          scroll={{ x: 1120 }}
+          scroll={{ x: 1230 }}
           size="middle"
         />
       </div>
@@ -963,6 +989,19 @@ export function TaskManagementPage() {
             <div>
               <strong>增量生成模式</strong>
               <p>已有 STRM 指向未变时直接跳过；完整扫描成功后会自动删除云盘中已失效的旧 STRM。</p>
+            </div>
+          </div>
+
+          <div className="task-switch-row">
+            <Form.Item name="aiRenameBeforeStrm" noStyle valuePropName="checked">
+              <Switch />
+            </Form.Item>
+            <div>
+              <strong>生成 STRM 前先执行 AI 重命名</strong>
+              <p>
+                使用“AI 自动重命名”页面中的全局接口、命名、目录重建和 TMDB 设置；AI
+                完成后才开始扫描并生成 STRM。
+              </p>
             </div>
           </div>
 

@@ -60,6 +60,7 @@ const storage: StorageItem = {
 }
 
 const currentTask: TaskItem = {
+  aiRenameBeforeStrm: true,
   directoryTimeCheck: true,
   id: 'task-1',
   incremental: true,
@@ -156,6 +157,7 @@ describe('TaskManagementPage', () => {
     expect(within(dialog).getAllByRole('switch')[0]).toBeChecked()
     expect(within(dialog).getAllByRole('switch')[1]).toBeChecked()
     expect(within(dialog).getAllByRole('switch')[2]).toBeChecked()
+    expect(within(dialog).getAllByRole('switch')[3]).toBeChecked()
   })
 
   it('prefills edit values from legacy task fields', async () => {
@@ -185,6 +187,23 @@ describe('TaskManagementPage', () => {
     expect(within(dialog).getByLabelText('执行时间（Crontab）')).toHaveValue('30 2 * * *')
     expect(within(dialog).getAllByRole('switch')[0]).not.toBeChecked()
     expect(within(dialog).getAllByRole('switch')[1]).toBeChecked()
-    expect(within(dialog).getAllByRole('switch')[2]).toBeChecked()
+    expect(within(dialog).getAllByRole('switch')[2]).not.toBeChecked()
+    expect(within(dialog).getAllByRole('switch')[3]).toBeChecked()
+  })
+
+  it('saves the AI rename pre-processing option with the STRM task', async () => {
+    vi.mocked(taskService.list).mockResolvedValue([currentTask])
+
+    renderPage()
+
+    const dialog = await openEditModal('电影')
+    await userEvent.setup().click(within(dialog).getByRole('button', { name: /保\s*存/ }))
+
+    expect(taskService.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        aiRenameBeforeStrm: true,
+        id: 'task-1',
+      }),
+    )
   })
 })

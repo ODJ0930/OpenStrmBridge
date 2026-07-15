@@ -108,6 +108,8 @@ describe('AI rename local-storage integration', () => {
   let libraryDirectory
   let managedLibraryDirectory
   let moveLibraryDirectory
+  let preStrmLibraryDirectory
+  let strmOutputDirectory
   const openListTree = new Map()
   const webDavTree = new Map()
   const backendOutput = []
@@ -138,6 +140,11 @@ describe('AI rename local-storage integration', () => {
       path.join(managedSeasonDirectory, 'Rick.and.Morty.S05E01.mkv'),
       'managed-season',
     )
+    preStrmLibraryDirectory = path.join(tempDirectory, 'pre-strm-library')
+    const preStrmSeasonDirectory = path.join(preStrmLibraryDirectory, 'Rick.and.Morty.S07.1080p')
+    await mkdir(preStrmSeasonDirectory, { recursive: true })
+    await writeFile(path.join(preStrmSeasonDirectory, 'Rick.and.Morty.S07E01.mkv'), 'pre-strm')
+    strmOutputDirectory = path.join(tempDirectory, 'strm-output')
 
     aiServer = createServer(async (request, response) => {
       if (request.method === 'GET' && request.url === '/v1/models') {
@@ -389,6 +396,15 @@ describe('AI rename local-storage integration', () => {
           status: 'connected',
         },
         {
+          accessMethod: 'local',
+          endpoint: preStrmLibraryDirectory,
+          id: 'local-pre-strm-test',
+          local: { path: preStrmLibraryDirectory },
+          name: '本地生成前重命名测试',
+          rootPath: preStrmLibraryDirectory,
+          status: 'connected',
+        },
+        {
           accessMethod: 'openlist',
           endpoint: openListBaseUrl,
           id: 'openlist-test',
@@ -419,6 +435,8 @@ describe('AI rename local-storage integration', () => {
         },
         strm: {
           mediaExtensions: 'mp4,mkv',
+          minMediaSizeMb: 0,
+          outputRoot: strmOutputDirectory,
           sidecarExtensions: 'nfo,jpg,png,srt',
         },
       }),
@@ -643,9 +661,7 @@ describe('AI rename local-storage integration', () => {
     expect(inventoryRequestGroupCounts.slice(inventoryRequestCountBefore)).toEqual([2])
     const taskAiRequests = aiRequestPayloads.slice(aiRequestCountBefore)
     expect(taskAiRequests).toHaveLength(1)
-    expect(String(taskAiRequests[0].messages?.at(-1)?.content)).toContain(
-      'Emby 标准结构',
-    )
+    expect(String(taskAiRequests[0].messages?.at(-1)?.content)).toContain('Emby 标准结构')
     expect(job.progress).toMatchObject({ processedGroups: 2, totalGroups: 2 })
     expect(job.results).toEqual(
       expect.arrayContaining([
@@ -732,6 +748,109 @@ describe('AI rename local-storage integration', () => {
     )
     expect(deleteResponse.status).toBe(200)
     expect(await deleteResponse.json()).toMatchObject({ deleted: true, ok: true })
+  }, 20_000)
+
+  it('runs AI rename before scanning and generating STRM when enabled on a task', async () => {
+    const headers = {
+      'Content-Type': 'application/json',
+      Origin: backendBaseUrl,
+      Referer: `${backendBaseUrl}/tasks`,
+    }
+    const taskId = 'pre-strm-ai-rename-task'
+    const taskName = '生成前整理测试'
+    const saveResponse = await fetch(`${backendBaseUrl}/api/tasks/${encodeURIComponent(taskId)}`, {
+      body: JSON.stringify({
+        aiRenameBeforeStrm: true,
+        directoryTimeCheck: true,
+        incremental: true,
+        name: taskName,
+        path: preStrmLibraryDirectory,
+        preRefreshOpenListCache: false,
+        schedule: '0 0 * * *',
+        storageId: 'local-pre-strm-test',
+      }),
+      headers,
+      method: 'PUT',
+    })
+    expect(saveResponse.status).toBe(200)
+    expect(await saveResponse.json()).toMatchObject({ aiRenameBeforeStrm: true, id: taskId })
+
+    const runResponse = await fetch(
+      `${backendBaseUrl}/api/tasks/${encodeURIComponent(taskId)}/run`,
+      { headers, method: 'POST' },
+    )
+    expect(runResponse.status).toBe(200)
+    const runResult = await runResponse.json()
+    expect(runResult.result).toMatchObject({
+      aiRenameFailed: 0,
+      aiRenameInventoryGroups: 1,
+      aiRenameStatus: 'completed',
+      aiRenameSubmittedGroups: 1,
+      aiRenameSucceeded: 2,
+      aiRenameUnchangedGroups: 0,
+      generated: 1,
+      ok: true,
+    })
+
+    const renamedDirectoryName = '瑞克和莫蒂 (Rick and Morty) (2013) - Season 07'
+    const renamedMediaName = '瑞克和莫蒂 (Rick and Morty) - S07E01.mkv'
+    const renamedMediaPath = path.join(
+      preStrmLibraryDirectory,
+      renamedDirectoryName,
+      renamedMediaName,
+    )
+    const generatedStrmPath = path.join(
+      strmOutputDirectory,
+      taskName,
+      renamedDirectoryName,
+      '瑞克和莫蒂 (Rick and Morty) - S07E01.strm',
+    )
+    expect(await readFile(renamedMediaPath, 'utf8')).toBe('pre-strm')
+    expect((await readFile(generatedStrmPath, 'utf8')).trim()).toBe(renamedMediaPath)
+    expect(runResult.task.lastLog.indexOf('>>> 开始生成 STRM 前的 AI 重命名')).toBeLessThan(
+      runResult.task.lastLog.indexOf('>>> 开始扫描并生成'),
+    )
+    expect(runResult.task.lastLog).toContain('AI 重命名预处理完成：状态 completed')
+    expect(runResult.task.lastLog).toContain('提交 LLM 1 个，未变化跳过 0 个')
+
+    const aiRequestCountAfterInitialRun = aiRequestPayloads.length
+    const unchangedRunResponse = await fetch(
+      `${backendBaseUrl}/api/tasks/${encodeURIComponent(taskId)}/run`,
+      { headers, method: 'POST' },
+    )
+    expect(unchangedRunResponse.status).toBe(200)
+    const unchangedRunResult = await unchangedRunResponse.json()
+    expect(unchangedRunResult.result).toMatchObject({
+      aiRenameInventoryGroups: 1,
+      aiRenameStatus: 'completed',
+      aiRenameSubmittedGroups: 0,
+      aiRenameUnchangedGroups: 1,
+      generated: 0,
+      skipped: 1,
+    })
+    expect(aiRequestPayloads).toHaveLength(aiRequestCountAfterInitialRun)
+    expect(unchangedRunResult.task.lastLog).toContain('本次未调用 AI')
+
+    const newSeasonDirectory = path.join(preStrmLibraryDirectory, 'Rick.and.Morty.S08.1080p')
+    await mkdir(newSeasonDirectory, { recursive: true })
+    await writeFile(path.join(newSeasonDirectory, 'Rick.and.Morty.S08E01.mkv'), 'pre-strm-new')
+    const incrementalInventoryCountBefore = inventoryRequestGroupCounts.length
+    const changedRunResponse = await fetch(
+      `${backendBaseUrl}/api/tasks/${encodeURIComponent(taskId)}/run`,
+      { headers, method: 'POST' },
+    )
+    expect(changedRunResponse.status).toBe(200)
+    const changedRunResult = await changedRunResponse.json()
+    expect(changedRunResult.result).toMatchObject({
+      aiRenameInventoryGroups: 2,
+      aiRenameStatus: 'completed',
+      aiRenameSubmittedGroups: 1,
+      aiRenameUnchangedGroups: 1,
+      generated: 1,
+      skipped: 1,
+    })
+    expect(aiRequestPayloads).toHaveLength(aiRequestCountAfterInitialRun + 1)
+    expect(inventoryRequestGroupCounts.slice(incrementalInventoryCountBefore)).toEqual([1])
   }, 20_000)
 
   it('renames OpenList entries through the filesystem API without overwriting', async () => {

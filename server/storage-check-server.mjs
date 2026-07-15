@@ -60,6 +60,7 @@ const settingsFile = path.join(dataDir, 'settings.json')
 const storagesFile = path.join(dataDir, 'storages.json')
 const tasksFile = path.join(dataDir, 'tasks.json')
 const aiRenameTasksFile = path.join(dataDir, 'ai-rename-tasks.json')
+const aiRenameIncrementalStateFile = path.join(dataDir, 'ai-rename-incremental-state.json')
 const strmIndexFile = path.join(dataDir, 'strm-index.json')
 const runtimeConfigFile =
   process.env.OPENSTRMBRIDGE_RUNTIME_CONFIG_FILE?.trim() ||
@@ -1024,6 +1025,57 @@ async function writeAiRenameTasks(tasks) {
   await rename(`${aiRenameTasksFile}.tmp`, aiRenameTasksFile)
 }
 
+let aiRenameIncrementalStateMutationQueue = Promise.resolve()
+
+async function readAiRenameIncrementalState() {
+  await ensureDataDir()
+
+  try {
+    const content = await readFile(aiRenameIncrementalStateFile, 'utf8')
+    const parsed = JSON.parse(content)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      return {}
+    }
+
+    throw error
+  }
+}
+
+async function writeAiRenameIncrementalState(state) {
+  await ensureDataDir()
+  await writeFile(`${aiRenameIncrementalStateFile}.tmp`, JSON.stringify(state, null, 2), 'utf8')
+  await rename(`${aiRenameIncrementalStateFile}.tmp`, aiRenameIncrementalStateFile)
+}
+
+function mutateAiRenameIncrementalState(mutator) {
+  const mutation = aiRenameIncrementalStateMutationQueue.then(async () => {
+    const currentState = await readAiRenameIncrementalState()
+    const nextState = await mutator(currentState)
+    await writeAiRenameIncrementalState(nextState)
+    return nextState
+  })
+
+  aiRenameIncrementalStateMutationQueue = mutation.catch(() => undefined)
+  return mutation
+}
+
+async function saveAiRenameIncrementalTaskState(taskId, taskState) {
+  return mutateAiRenameIncrementalState((currentState) => ({
+    ...currentState,
+    [taskId]: taskState,
+  }))
+}
+
+async function deleteAiRenameIncrementalTaskState(taskId) {
+  return mutateAiRenameIncrementalState((currentState) => {
+    const nextState = { ...currentState }
+    delete nextState[taskId]
+    return nextState
+  })
+}
+
 async function readStrmIndex() {
   try {
     const content = await readFile(strmIndexFile, 'utf8')
@@ -1432,6 +1484,12 @@ function normalizeTask(task, storages, strmSettings, options = {}) {
     schedule,
     nextRun: options.preserveNextRun && nextRun ? nextRun : calculateNextRun(schedule),
     status: normalizeTaskStatus(task.status),
+    aiRenameBeforeStrm: firstBoolean(
+      false,
+      task.aiRenameBeforeStrm,
+      task.aiRenameFirst,
+      task.preAiRename,
+    ),
     directoryTimeCheck: firstBoolean(
       true,
       task.directoryTimeCheck,
@@ -1495,6 +1553,7 @@ async function deleteTask(taskId) {
   const tasks = await readTasks()
   const nextTasks = tasks.filter((item) => item.id !== taskId)
   await writeTasks(nextTasks)
+  await deleteAiRenameIncrementalTaskState(taskId).catch(() => undefined)
   return nextTasks.length !== tasks.length
 }
 
@@ -2906,16 +2965,27 @@ function getAiRenameJobForClient(job) {
   }
 }
 
+function notifyAiRenameJobProgress(job, event) {
+  try {
+    job.onProgress?.(event)
+  } catch {
+    // Progress reporting must never interrupt a rename operation.
+  }
+}
+
 function setAiRenameJobStage(job, stage, message) {
   job.stage = stage
   job.message = message
+  notifyAiRenameJobProgress(job, { message, stage, type: 'stage' })
 }
 
 function appendAiRenameJobResult(job, result, countAs = '') {
-  job.results.push({
+  const jobResult = {
     at: new Date().toISOString(),
     ...result,
-  })
+  }
+  job.results.push(jobResult)
+  notifyAiRenameJobProgress(job, { result: jobResult, type: 'result' })
 
   if (job.results.length > 2000) {
     job.results.splice(0, job.results.length - 2000)
@@ -3047,6 +3117,64 @@ function createAiRenameInventoryPrompt(
   ]
     .filter(Boolean)
     .join('\n')
+}
+
+function createAiRenameGroupRecords(entries, extensionSets) {
+  const groupedEntries = new Map()
+
+  for (const entry of entries) {
+    const group = groupedEntries.get(entry.topId) ?? []
+    group.push(entry)
+    groupedEntries.set(entry.topId, group)
+  }
+
+  return [...groupedEntries.values()]
+    .filter((group) =>
+      group.some((entry) => entry.kind === 'file' && isMediaFileName(entry.name, extensionSets)),
+    )
+    .map((groupEntries) => ({
+      fingerprint: createAiRenameGroupFingerprint(groupEntries),
+      groupEntries,
+      groupId: String(groupEntries[0]?.topId ?? ''),
+      groupPath: getTopEntryForPlan(groupEntries)?.path ?? groupEntries[0]?.path ?? '',
+    }))
+}
+
+function createAiRenameGroupFingerprint(groupEntries) {
+  const inventory = groupEntries
+    .map((entry) => ({
+      eligible: entry.eligible === true,
+      kind: entry.kind,
+      name: entry.name,
+      relativePath: String(entry.relativePath ?? '').replaceAll('\\', '/'),
+    }))
+    .sort((first, second) => {
+      return (
+        first.relativePath.localeCompare(second.relativePath) ||
+        first.kind.localeCompare(second.kind) ||
+        first.name.localeCompare(second.name)
+      )
+    })
+
+  return createHash('sha256').update(JSON.stringify(inventory)).digest('hex')
+}
+
+function createAiRenameConfigurationFingerprint(aiSettings) {
+  return createHash('sha256')
+    .update(
+      JSON.stringify({
+        baseUrl: aiSettings.baseUrl,
+        customParameters: aiSettings.customParameters,
+        model: aiSettings.model,
+        namingStyle: aiSettings.namingStyle,
+        promptTemplate: aiSettings.promptTemplate,
+        rebuildFolders: aiSettings.rebuildFolders,
+        tmdbBaseUrl: aiSettings.tmdbBaseUrl,
+        tmdbEnabled: aiSettings.tmdbEnabled && Boolean(aiSettings.tmdbToken),
+        tmdbLanguage: aiSettings.tmdbLanguage,
+      }),
+    )
+    .digest('hex')
 }
 
 async function classifyAiRenameInventory(aiSettings, groupRecords, rootNames, job, extraPrompt) {
@@ -3737,23 +3865,37 @@ async function runAiRenameJob(job, payload) {
     throwIfAiRenameCancelled(job)
 
     const rootNames = entries.filter((entry) => entry.depth === 1).map((entry) => entry.name)
-    const groupedEntries = new Map()
-
-    for (const entry of entries) {
-      const group = groupedEntries.get(entry.topId) ?? []
-      group.push(entry)
-      groupedEntries.set(entry.topId, group)
-    }
-
-    const groups = [...groupedEntries.values()].filter((group) =>
-      group.some((entry) => entry.kind === 'file' && isMediaFileName(entry.name, extensionSets)),
-    )
-    const groupRecords = groups.map((groupEntries) => ({
-      groupEntries,
-      groupId: String(groupEntries[0]?.topId ?? ''),
-      groupPath: getTopEntryForPlan(groupEntries)?.path ?? groupEntries[0]?.path ?? operationRoot,
+    const allGroupRecords = createAiRenameGroupRecords(entries, extensionSets).map((record) => ({
+      ...record,
+      groupPath: record.groupPath || operationRoot,
     }))
+    const unchangedFingerprints = new Set(
+      Array.isArray(payload.unchangedGroupFingerprints)
+        ? payload.unchangedGroupFingerprints.map((fingerprint) => String(fingerprint))
+        : [],
+    )
+    const groupRecords = allGroupRecords.filter(
+      (record) => !unchangedFingerprints.has(record.fingerprint),
+    )
+    const unchangedGroupCount = allGroupRecords.length - groupRecords.length
+    job.incrementalInventory = {
+      currentFingerprints: allGroupRecords.map((record) => record.fingerprint),
+      inventoryGroups: allGroupRecords.length,
+      submittedGroups: groupRecords.length,
+      unchangedGroups: unchangedGroupCount,
+    }
+    job.progress.inventoryGroups = allGroupRecords.length
+    job.progress.unchangedGroups = unchangedGroupCount
     job.progress.totalGroups = groupRecords.length
+
+    if (unchangedGroupCount > 0) {
+      appendAiRenameJobResult(job, {
+        action: 'inventory',
+        message: `增量计算跳过 ${unchangedGroupCount} 个未变化目录，本次仅提交 ${groupRecords.length} 个变化目录`,
+        oldPath: operationRoot,
+        status: 'info',
+      })
+    }
 
     let suggestionsByGroup = new Map()
 
@@ -3785,6 +3927,13 @@ async function runAiRenameJob(job, payload) {
       appendAiRenameJobResult(job, {
         action: 'inventory',
         message: `AI 已一次性返回 ${suggestionsByGroup.size}/${groupRecords.length} 个目录的修改建议，开始按顺序执行`,
+        oldPath: operationRoot,
+        status: 'info',
+      })
+    } else if (allGroupRecords.length > 0) {
+      appendAiRenameJobResult(job, {
+        action: 'inventory',
+        message: `增量计算确认 ${allGroupRecords.length} 个视频目录均未变化，本次未调用 AI`,
         oldPath: operationRoot,
         status: 'info',
       })
@@ -3994,12 +4143,14 @@ async function createAiRenameJob(payload, options = {}) {
       completedOperations: 0,
       failed: 0,
       ignored: 0,
+      inventoryGroups: 0,
       scanned: 0,
       skipped: 0,
       succeeded: 0,
       totalOperations: 0,
       processedGroups: 0,
       totalGroups: 0,
+      unchangedGroups: 0,
     },
     results: [],
     stage: 'queued',
@@ -6573,6 +6724,155 @@ function getTaskRunCompletionStatus(result = {}) {
   return 'failed'
 }
 
+function formatPreStrmAiRenameResultLog(result = {}) {
+  const action = String(result.action ?? '处理')
+  const status = String(result.status ?? 'info')
+  const sourcePath = String(result.oldPath ?? '').trim()
+  const targetPath = String(result.newPath ?? '').trim()
+  const pathText = targetPath
+    ? `${sourcePath || '(未知源路径)'} -> ${targetPath}`
+    : sourcePath
+      ? sourcePath
+      : ''
+
+  return `[AI 重命名][${status}][${action}] ${String(result.message ?? '').trim()}${pathText ? ` | ${pathText}` : ''}`
+}
+
+async function scanAiRenameInventoryFingerprints(storage, taskPath, settings) {
+  const scanJob = {
+    abortController: new AbortController(),
+    cancelRequested: false,
+    currentPath: '',
+    progress: { scanned: 0 },
+  }
+  const extensionSets = getRenameExtensionSets(settings.strm)
+  const { entries } = await scanAiRenameTree(storage, taskPath, scanJob, extensionSets)
+
+  return createAiRenameGroupRecords(entries, extensionSets).map((record) => record.fingerprint)
+}
+
+async function runPreStrmAiRename(task, storage, settings, logLines) {
+  const aiSettings = normalizeAiRenameSettings(settings.aiRename)
+  const configurationFingerprint = createAiRenameConfigurationFingerprint(aiSettings)
+  let unchangedGroupFingerprints = []
+
+  try {
+    const incrementalState = await readAiRenameIncrementalState()
+    const taskState = incrementalState[task.id]
+    const canReuseState =
+      taskState?.configurationFingerprint === configurationFingerprint &&
+      taskState?.storageId === task.storageId &&
+      taskState?.path === task.path &&
+      Array.isArray(taskState?.groupFingerprints)
+
+    if (canReuseState) {
+      unchangedGroupFingerprints = taskState.groupFingerprints.map((fingerprint) =>
+        String(fingerprint),
+      )
+      logLines.push(`AI 增量基线已加载：${unchangedGroupFingerprints.length} 个已处理视频目录。`)
+    } else {
+      logLines.push('AI 增量基线不存在或配置已变化，本次执行全量目录识别。')
+    }
+  } catch (error) {
+    logLines.push(`读取 AI 增量基线失败，本次回退全量识别: ${getErrorMessage(error)}`)
+  }
+
+  const payload = {
+    extraPrompt: '',
+    path: task.path,
+    recursive: true,
+    storageId: task.storageId,
+    unchangedGroupFingerprints,
+    useTmdb: aiSettings.tmdbEnabled && Boolean(aiSettings.tmdbToken),
+  }
+
+  logLines.push('>>> 开始生成 STRM 前的 AI 重命名')
+  logLines.push(
+    `AI 预处理参数: 重建标准目录 ${aiSettings.rebuildFolders ? 'true' : 'false'}，TMDB 校验 ${payload.useTmdb ? 'true' : 'false'}`,
+  )
+
+  let job
+
+  try {
+    const createdJob = await createAiRenameJob(payload, { deferStart: true })
+    job = aiRenameJobs.get(createdJob.id)
+
+    if (!job) {
+      throw new Error('AI 重命名任务创建后未找到运行实例')
+    }
+
+    let lastStageMessage = ''
+    job.onProgress = (event) => {
+      if (event.type === 'stage') {
+        const stageMessage = `[AI 重命名][${event.stage}] ${event.message}`
+
+        if (stageMessage !== lastStageMessage) {
+          lastStageMessage = stageMessage
+          logLines.push(stageMessage)
+        }
+        return
+      }
+
+      if (event.type === 'result') {
+        logLines.push(formatPreStrmAiRenameResultLog(event.result))
+      }
+    }
+
+    await runAiRenameJob(job, { ...payload, allowMove: job.allowMove })
+  } catch (error) {
+    logLines.push(`AI 重命名预处理启动或执行失败: ${getErrorMessage(error)}`)
+    throw error
+  } finally {
+    if (job) {
+      job.onProgress = undefined
+    }
+  }
+
+  const result = getAiRenameJobForClient(job)
+  const incrementalInventory = job.incrementalInventory ?? {
+    currentFingerprints: [],
+    inventoryGroups: 0,
+    submittedGroups: 0,
+    unchangedGroups: 0,
+  }
+  logLines.push(
+    `AI 重命名预处理完成：状态 ${result.status}，成功 ${result.progress.succeeded}，跳过 ${result.progress.skipped}，失败 ${result.progress.failed}。`,
+  )
+  logLines.push(
+    `AI 增量统计：视频目录 ${incrementalInventory.inventoryGroups} 个，提交 LLM ${incrementalInventory.submittedGroups} 个，未变化跳过 ${incrementalInventory.unchangedGroups} 个。`,
+  )
+
+  if (!['completed', 'partial'].includes(result.status)) {
+    throw new Error(`AI 重命名预处理未成功完成：${result.message || result.status}`)
+  }
+
+  if (result.status === 'partial') {
+    logLines.push('AI 重命名存在跳过或失败项目，将基于当前云盘状态继续生成 STRM。')
+    logLines.push('本次存在失败或跳过项目，未更新 AI 增量基线，下次运行会继续重试变化目录。')
+  } else {
+    try {
+      const groupFingerprints =
+        incrementalInventory.submittedGroups === 0
+          ? incrementalInventory.currentFingerprints
+          : await scanAiRenameInventoryFingerprints(storage, task.path, settings)
+      await saveAiRenameIncrementalTaskState(task.id, {
+        configurationFingerprint,
+        groupFingerprints: [...new Set(groupFingerprints)].sort(),
+        path: task.path,
+        storageId: task.storageId,
+        updatedAt: new Date().toISOString(),
+      })
+      logLines.push(`AI 增量基线已更新：${groupFingerprints.length} 个视频目录。`)
+    } catch (error) {
+      logLines.push(`更新 AI 增量基线失败，下次将重新识别: ${getErrorMessage(error)}`)
+    }
+  }
+
+  logLines.push('------------------------------------------------------------')
+  result.incrementalInventory = incrementalInventory
+  return result
+}
+
 async function executeTask(task, storage, strmSettings, settings = {}) {
   const startedAt = new Date()
   const outputPath = getTaskOutputVirtualPath(task.name, strmSettings.outputRoot)
@@ -6585,6 +6885,7 @@ async function executeTask(task, storage, strmSettings, settings = {}) {
     `保存目录: ${outputPath}`,
     `目录时间检查: ${task.directoryTimeCheck ? 'true' : 'false'}`,
     `增量生成模式: ${task.incremental ? 'true' : 'false'}`,
+    `生成前 AI 重命名: ${task.aiRenameBeforeStrm ? 'true' : 'false'}`,
     `预先刷新 OpenList 缓存: ${task.preRefreshOpenListCache ? 'true' : 'false'}`,
     `直链签名: ${shouldAppendAListSign(storage) ? 'true' : 'false'}`,
     `STRM 中转: ${shouldUseStrmRedirect(storage) ? 'true' : 'false'}`,
@@ -6595,6 +6896,12 @@ async function executeTask(task, storage, strmSettings, settings = {}) {
   ])
 
   await mkdir(outputDirectory, { recursive: true })
+
+  let aiRenameResult
+
+  if (task.aiRenameBeforeStrm) {
+    aiRenameResult = await runPreStrmAiRename(task, storage, settings, logLines)
+  }
 
   if (task.preRefreshOpenListCache) {
     if (storage.accessMethod === 'openlist') {
@@ -6708,7 +7015,7 @@ async function executeTask(task, storage, strmSettings, settings = {}) {
   }
 
   const finishedAt = new Date()
-  const status = getTaskRunCompletionStatus({
+  const strmStatus = getTaskRunCompletionStatus({
     failed,
     failedDirectories,
     generated,
@@ -6716,6 +7023,8 @@ async function executeTask(task, storage, strmSettings, settings = {}) {
     scanLimitReached,
     skipped,
   })
+  const status =
+    aiRenameResult?.status === 'partial' && strmStatus === 'succeeded' ? 'partial' : strmStatus
   const ok = status === 'succeeded'
   const partial = status === 'partial'
 
@@ -6734,6 +7043,13 @@ async function executeTask(task, storage, strmSettings, settings = {}) {
       cleanupRemovedDirectories,
       cleanupShared,
       cleanupSkipped,
+      aiRenameFailed: aiRenameResult?.progress.failed ?? 0,
+      aiRenameInventoryGroups: aiRenameResult?.incrementalInventory?.inventoryGroups ?? 0,
+      aiRenameSkipped: aiRenameResult?.progress.skipped ?? 0,
+      aiRenameStatus: aiRenameResult?.status ?? 'skipped',
+      aiRenameSubmittedGroups: aiRenameResult?.incrementalInventory?.submittedGroups ?? 0,
+      aiRenameSucceeded: aiRenameResult?.progress.succeeded ?? 0,
+      aiRenameUnchangedGroups: aiRenameResult?.incrementalInventory?.unchangedGroups ?? 0,
       failed,
       failedDirectories,
       finishedAt: finishedAt.toISOString(),

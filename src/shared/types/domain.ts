@@ -12,6 +12,7 @@ export interface TaskItem {
   schedule: string
   nextRun: string
   status: TaskStatus
+  aiRenameBeforeStrm: boolean
   directoryTimeCheck: boolean
   incremental: boolean
   preRefreshOpenListCache: boolean
@@ -31,6 +32,13 @@ export interface TaskRunResult {
   cleanupRemovedDirectories?: number
   cleanupShared?: number
   cleanupSkipped?: boolean
+  aiRenameStatus?: 'completed' | 'partial' | 'failed' | 'cancelled' | 'skipped'
+  aiRenameSucceeded?: number
+  aiRenameSkipped?: number
+  aiRenameFailed?: number
+  aiRenameInventoryGroups?: number
+  aiRenameSubmittedGroups?: number
+  aiRenameUnchangedGroups?: number
   scannedDirectories: number
   mediaFiles: number
   generated: number
@@ -160,12 +168,14 @@ export interface AiRenameJobProgress {
   completedOperations: number
   failed: number
   ignored: number
+  inventoryGroups?: number
   processedGroups?: number
   scanned: number
   skipped: number
   succeeded: number
   totalGroups?: number
   totalOperations: number
+  unchangedGroups?: number
 }
 
 export interface AiRenameJobResultItem {
