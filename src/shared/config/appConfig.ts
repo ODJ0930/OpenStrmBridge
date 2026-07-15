@@ -1,9 +1,12 @@
+import packageMetadata from '../../../package.json'
 import type { NavItem, SettingsTabKey } from '../types/ui'
+
+const appVersion = String(packageMetadata.version).replace(/^v/i, '')
 
 export const brandConfig = {
   name: 'OpenStrmBridge',
   shortName: 'OSB',
-  version: 'v0.1.2',
+  version: `v${appVersion}`,
   repositoryLabel: 'OpenStrmBridge',
 } as const
 
@@ -11,6 +14,8 @@ export const routes = {
   tasks: { path: '/tasks', label: '任务管理', icon: 'tasks' },
   storage: { path: '/storage', label: '存储管理', icon: 'storage' },
   browser: { path: '/browser', label: '存储浏览', icon: 'browser' },
+  aiRename: { path: '/ai-rename', label: 'AI 自动重命名', icon: 'sparkles' },
+  aiRenameTasks: { path: '/ai-rename-tasks', label: 'AI 重命名任务', icon: 'tasks' },
   plugins: { path: '/plugins', label: '神医助手', icon: 'plugins' },
   apiAccess: { path: '/api-access', label: 'API 接口', icon: 'shield' },
   settings: { path: '/settings', label: '系统设置', icon: 'settings' },

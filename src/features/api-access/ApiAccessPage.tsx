@@ -95,6 +95,19 @@ const apiEndpointGroups = [
       ['DELETE', '/api/storage/{storageId}', '删除指定存储配置。'],
       ['POST', '/api/storage/check', '检查存储连接状态，可用于验证 Token、WebDAV 账号或本地路径。'],
       ['POST', '/api/storage/browse', '浏览指定存储目录，Body 包含 storageId 和 path。'],
+      ['POST', '/api/storage/ai-rename/jobs', '创建递归 AI 重命名任务。'],
+      ['GET', '/api/storage/ai-rename/jobs/{jobId}', '读取 AI 重命名任务进度和逐项结果。'],
+      ['POST', '/api/storage/ai-rename/jobs/{jobId}/cancel', '停止尚未完成的重命名操作。'],
+      ['POST', '/api/ai-rename/models', '探测 OpenAI 兼容接口支持的模型列表。'],
+      ['POST', '/api/ai-rename/test', '测试模型可用性并返回请求耗时和输出速度。'],
+      ['POST', '/api/ai-rename/tmdb/test', '单独测试 TMDB Token 与接口连通性。'],
+      ['GET', '/api/ai-rename/tasks', '读取已保存的 AI 重命名任务配置和最近结果。'],
+      ['PUT', '/api/ai-rename/tasks/{taskId}', '新增或更新可重复运行的 AI 重命名任务。'],
+      ['DELETE', '/api/ai-rename/tasks/{taskId}', '删除 AI 重命名任务配置。'],
+      ['POST', '/api/ai-rename/tasks/{taskId}/run', '运行指定 AI 重命名任务。'],
+      ['POST', '/api/ai-rename/tasks/{taskId}/stop', '停止指定 AI 重命名任务。'],
+      ['GET', '/api/ai-rename/tasks/{taskId}/result', '读取指定任务的最近进度与逐项结果。'],
+      ['POST', '/api/ai-rename/tasks/run-all', '运行全部未在执行的 AI 重命名任务。'],
     ],
   },
   {
@@ -102,10 +115,24 @@ const apiEndpointGroups = [
     description: '读取和更新 STRM、302 代理、Emby 授权与 Webhook 设置。',
     endpoints: [
       ['GET', '/api/settings', '读取完整系统设置，并包含 302 代理运行状态。'],
-      ['PUT', '/api/settings/strm', '保存 STRM 设置，例如输出目录、媒体后缀、扫描线程数量和签名设置。'],
-      ['PUT', '/api/settings/proxy302', '保存 302 代理设置，并同步启动或停止 go-emby2openlist 代理。'],
+      [
+        'PUT',
+        '/api/settings/strm',
+        '保存 STRM 设置，例如输出目录、媒体后缀、扫描线程数量和签名设置。',
+      ],
+      [
+        'PUT',
+        '/api/settings/proxy302',
+        '保存 302 代理设置，并同步启动或停止 go-emby2openlist 代理。',
+      ],
       ['PUT', '/api/settings/emby', '保存 Emby API Key。'],
       ['PUT', '/api/settings/webhook', '保存 Webhook URL 和删除同步开关。'],
+      [
+        'PUT',
+        '/api/settings/ai-rename',
+        '保存 OpenAI 兼容接口、自定义 Chat Completions 参数和可选 TMDB 配置。',
+      ],
+      ['POST', '/api/ai-rename/test', '测试 AI 与可选 TMDB 连接。'],
     ],
   },
   {
@@ -115,7 +142,11 @@ const apiEndpointGroups = [
       ['GET', '/api/strm-assistant', '读取神医助手检测结果、功能能力、选项和计划任务状态。'],
       ['GET', '/api/emby-plugin', '读取 Emby 插件检测结果。'],
       ['PUT', '/api/strm-assistant/directory', '保存神医助手插件目录。'],
-      ['PUT', '/api/strm-assistant/plugin-settings', '读取现有配置后写回神医助手实际插件参数，例如追更模式、线程数、媒体信息提取、片头探测和合并多版本。'],
+      [
+        'PUT',
+        '/api/strm-assistant/plugin-settings',
+        '读取现有配置后写回神医助手实际插件参数，例如追更模式、线程数、媒体信息提取、片头探测和合并多版本。',
+      ],
       ['PUT', '/api/strm-assistant/task-schedule', '保存神医助手计划任务触发方式。'],
       ['GET', '/api/strm-assistant/task-runs/{taskId}', '读取指定神医助手任务运行进度。'],
       ['POST', '/api/strm-assistant/task-runs/{taskId}', '立即提交指定神医助手任务。'],
@@ -135,7 +166,11 @@ const apiEndpointGroups = [
     title: '播放中转 / Webhook',
     description: '供 Emby、播放器和 Webhook 使用的运行时接口，通常不需要 API 秘钥。',
     endpoints: [
-      ['GET/HEAD', '/api/strm/redirect/{storageId}/{path}', 'STRM 中转播放接口，返回可播放直链或重定向。'],
+      [
+        'GET/HEAD',
+        '/api/strm/redirect/{storageId}/{path}',
+        'STRM 中转播放接口，返回可播放直链或重定向。',
+      ],
       ['GET/HEAD', '/api/openlist/direct/{storageId}/d/{path}', 'OpenList / Alist 直链兑换接口。'],
       ['POST', '/webhook/{token}', 'Emby 删除事件 Webhook，根据 URL token 鉴权。'],
     ],
@@ -342,7 +377,10 @@ export function ApiAccessPage() {
             <h2>完整 API 功能清单</h2>
             <p>外部客户端可通过这些接口控制本程序主要功能；除特别标注外均需要 API 秘钥。</p>
           </div>
-          <Tag color="processing">共 {apiEndpointGroups.reduce((total, group) => total + group.endpoints.length, 0)} 个接口</Tag>
+          <Tag color="processing">
+            共 {apiEndpointGroups.reduce((total, group) => total + group.endpoints.length, 0)}{' '}
+            个接口
+          </Tag>
         </div>
 
         <div className="api-endpoint-group-list">

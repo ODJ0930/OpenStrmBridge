@@ -7,6 +7,7 @@ import {
   readFile,
   readdir,
   rename,
+  rmdir,
   stat,
   unlink,
   writeFile,
@@ -15,7 +16,42 @@ import path from 'node:path'
 import { Readable } from 'node:stream'
 import { fileURLToPath } from 'node:url'
 
+import {
+  formatSeasonDirectory,
+  formatSeriesTitle,
+  getLowerExtension,
+  getRenameExtensionSets,
+  isMediaFileName,
+  isSidecarFileName,
+  isValidRenameBasename,
+  normalizeAiClassification,
+  normalizeComparableTitle,
+  normalizeNamingStyle,
+  normalizeSeriesMetadata,
+  parseAiJsonContent,
+  renderEpisodeFileName,
+  renderFolderName,
+  renderSidecarFileName,
+} from './ai-rename-core.mjs'
+
 const DEFAULT_PORT = 5174
+const legacyAiRenamePromptTemplate = [
+  '你是电视剧媒体库命名分析器。请仅依据现有目录名和文件名识别剧集信息。',
+  '识别正式中文名、英文或原始标题、首播年份、季号、集号、多集编号、版本号和分段标记。',
+  '目录季号与文件季号冲突时，以多数视频文件中可验证的季集信息为准。',
+  '广告图片、网站宣传文件、发布组与画质编码信息应忽略；无法可靠识别的条目不要猜测。',
+  '字幕、NFO、海报等附属文件只在能可靠关联视频时标记。',
+].join('\n')
+const defaultAiRenamePromptTemplate = [
+  '你是电视剧媒体库命名分析器。请仅依据现有目录名和文件名识别剧集信息。',
+  '识别正式简体中文名、官方或通用英文名、首播年份、季号、集号、多集编号、版本号和分段标记。',
+  'titleOriginal 必须填英文名，不要填韩文、日文或其他原始语种标题；无法确认英文名时才使用可靠的罗马字转写。',
+  '输出元数据将由后端固定整理为 Emby 电视剧结构：“剧集显示名 (首播年份)/Season 01/剧集显示名 - S01E01.ext”。',
+  '特别篇使用 Season 00 和 S00E01；多集文件使用 S01E01-E02；集号和季号必须用数字字段返回。',
+  '目录季号与文件季号冲突时，以多数视频文件中可验证的季集信息为准。',
+  '广告图片、网站宣传文件、发布组与画质编码信息应忽略；无法可靠识别的条目不要猜测。',
+  '字幕、NFO、海报等附属文件只在能可靠关联视频时标记。',
+].join('\n')
 const port = Number.parseInt(process.env.OPENSTRMBRIDGE_BACKEND_PORT ?? '', 10) || DEFAULT_PORT
 const host = process.env.OPENSTRMBRIDGE_BACKEND_HOST?.trim() || '127.0.0.1'
 const dataDir = process.env.OPENSTRMBRIDGE_DATA_DIR ?? path.join(process.cwd(), 'data')
@@ -23,6 +59,7 @@ const webDir = process.env.OPENSTRMBRIDGE_WEB_DIR?.trim() || path.join(process.c
 const settingsFile = path.join(dataDir, 'settings.json')
 const storagesFile = path.join(dataDir, 'storages.json')
 const tasksFile = path.join(dataDir, 'tasks.json')
+const aiRenameTasksFile = path.join(dataDir, 'ai-rename-tasks.json')
 const strmIndexFile = path.join(dataDir, 'strm-index.json')
 const runtimeConfigFile =
   process.env.OPENSTRMBRIDGE_RUNTIME_CONFIG_FILE?.trim() ||
@@ -229,9 +266,23 @@ const defaultMediaExtensions = new Set([
   '.wmv',
 ])
 
+const configuredScanDirectoryLimit = Number.parseInt(
+  process.env.OPENSTRMBRIDGE_SCAN_DIRECTORY_LIMIT ?? '',
+  10,
+)
+const configuredScanMediaFileLimit = Number.parseInt(
+  process.env.OPENSTRMBRIDGE_SCAN_MEDIA_FILE_LIMIT ?? '',
+  10,
+)
 const scanLimits = {
-  directories: 2000,
-  mediaFiles: 5000,
+  directories:
+    Number.isFinite(configuredScanDirectoryLimit) && configuredScanDirectoryLimit > 0
+      ? configuredScanDirectoryLimit
+      : 2000,
+  mediaFiles:
+    Number.isFinite(configuredScanMediaFileLimit) && configuredScanMediaFileLimit > 0
+      ? configuredScanMediaFileLimit
+      : 5000,
 }
 
 const taskRuntimeLogs = new Map()
@@ -564,11 +615,131 @@ function normalizeEmbySettings(embySettings = {}, proxySettings = {}) {
   }
 }
 
+const protectedAiRenameParameterNames = new Set([
+  '__proto__',
+  'constructor',
+  'messages',
+  'model',
+  'prototype',
+  'response_format',
+  'stream',
+])
+
+function parseAiRenameCustomParameters(value, options = {}) {
+  const strict = options.strict === true
+  let parsed = value
+
+  if (typeof value === 'string') {
+    const text = value.trim() || '{}'
+
+    if (text.length > 10000) {
+      if (strict) {
+        throw new Error('AI 自定义参数不能超过 10000 个字符')
+      }
+
+      return {}
+    }
+
+    try {
+      parsed = JSON.parse(text)
+    } catch {
+      if (strict) {
+        throw new Error('AI 自定义参数必须是有效的 JSON 对象')
+      }
+
+      return {}
+    }
+  }
+
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    if (strict) {
+      throw new Error('AI 自定义参数必须是 JSON 对象，不能是数组或其他类型')
+    }
+
+    return {}
+  }
+
+  if (JSON.stringify(parsed).length > 10000) {
+    if (strict) {
+      throw new Error('AI 自定义参数不能超过 10000 个字符')
+    }
+
+    return {}
+  }
+
+  const normalized = {}
+
+  for (const [key, parameterValue] of Object.entries(parsed)) {
+    if (protectedAiRenameParameterNames.has(key)) {
+      if (strict) {
+        throw new Error(`AI 自定义参数不能覆盖受保护字段：${key}`)
+      }
+
+      continue
+    }
+
+    normalized[key] = parameterValue
+  }
+
+  return normalized
+}
+
+function formatAiRenameCustomParameters(value) {
+  return JSON.stringify(parseAiRenameCustomParameters(value), null, 2)
+}
+
+function normalizeAiRenameSettings(aiRenameSettings = {}) {
+  const baseUrl = normalizeEndpoint(
+    aiRenameSettings.baseUrl || aiRenameSettings.apiBaseUrl || 'https://api.openai.com/v1',
+  )
+  const tmdbBaseUrl = normalizeEndpoint(
+    aiRenameSettings.tmdbBaseUrl || 'https://api.themoviedb.org/3',
+  )
+
+  const configuredPrompt = String(aiRenameSettings.promptTemplate ?? '').trim()
+
+  return {
+    apiKey: String(aiRenameSettings.apiKey ?? '').trim(),
+    baseUrl,
+    customParameters: formatAiRenameCustomParameters(aiRenameSettings.customParameters),
+    model: String(aiRenameSettings.model ?? '').trim(),
+    namingStyle: normalizeNamingStyle(aiRenameSettings.namingStyle),
+    promptTemplate:
+      !configuredPrompt || configuredPrompt === legacyAiRenamePromptTemplate
+        ? defaultAiRenamePromptTemplate
+        : configuredPrompt,
+    rebuildFolders: aiRenameSettings.rebuildFolders === true,
+    tmdbBaseUrl,
+    tmdbEnabled: aiRenameSettings.tmdbEnabled === true,
+    tmdbLanguage: String(aiRenameSettings.tmdbLanguage ?? 'zh-CN').trim() || 'zh-CN',
+    tmdbToken: String(aiRenameSettings.tmdbToken ?? '').trim(),
+  }
+}
+
+function getAiRenameSettingsForClient(aiRenameSettings = {}) {
+  const normalized = normalizeAiRenameSettings(aiRenameSettings)
+
+  return {
+    apiKeyConfigured: Boolean(normalized.apiKey),
+    baseUrl: normalized.baseUrl,
+    customParameters: normalized.customParameters,
+    model: normalized.model,
+    namingStyle: normalized.namingStyle,
+    promptTemplate: normalized.promptTemplate,
+    rebuildFolders: normalized.rebuildFolders,
+    tmdbBaseUrl: normalized.tmdbBaseUrl,
+    tmdbEnabled: normalized.tmdbEnabled,
+    tmdbLanguage: normalized.tmdbLanguage,
+    tmdbTokenConfigured: Boolean(normalized.tmdbToken),
+  }
+}
+
 function createDefaultSettings(baseUrl = '') {
   const normalizedBaseUrl = normalizeEndpoint(baseUrl)
   const webhookToken = createSecret(12)
 
   return {
+    aiRename: normalizeAiRenameSettings(),
     apiAccess: normalizeApiAccessSettings(),
     proxy302: {
       apiSecret: createSecret(18),
@@ -613,6 +784,10 @@ function createDefaultSettings(baseUrl = '') {
 function mergeSettings(settings, baseUrl = '') {
   const defaults = createDefaultSettings(baseUrl)
   const nextSettings = {
+    aiRename: normalizeAiRenameSettings({
+      ...defaults.aiRename,
+      ...settings?.aiRename,
+    }),
     apiAccess: normalizeApiAccessSettings(settings?.apiAccess ?? defaults.apiAccess),
     emby: normalizeEmbySettings(settings?.emby, settings?.proxy302),
     proxy302: normalizeProxy302Settings({
@@ -624,7 +799,9 @@ function mergeSettings(settings, baseUrl = '') {
       ...settings?.strm,
       baseUrl: normalizeEndpoint(settings?.strm?.baseUrl || baseUrl || defaults.strm.baseUrl),
       outputRoot: normalizeOutputRoot(settings?.strm?.outputRoot || defaults.strm.outputRoot),
-      threadCount: normalizeStrmThreadCount(settings?.strm?.threadCount ?? defaults.strm.threadCount),
+      threadCount: normalizeStrmThreadCount(
+        settings?.strm?.threadCount ?? defaults.strm.threadCount,
+      ),
     },
     strmAssistant: {
       ...defaults.strmAssistant,
@@ -825,6 +1002,28 @@ async function writeTasks(tasks) {
   await rename(`${tasksFile}.tmp`, tasksFile)
 }
 
+async function readAiRenameTasks() {
+  await ensureDataDir()
+
+  try {
+    const content = await readFile(aiRenameTasksFile, 'utf8')
+    const parsed = JSON.parse(content)
+    return Array.isArray(parsed) ? parsed : []
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      return []
+    }
+
+    throw error
+  }
+}
+
+async function writeAiRenameTasks(tasks) {
+  await ensureDataDir()
+  await writeFile(`${aiRenameTasksFile}.tmp`, JSON.stringify(tasks, null, 2), 'utf8')
+  await rename(`${aiRenameTasksFile}.tmp`, aiRenameTasksFile)
+}
+
 async function readStrmIndex() {
   try {
     const content = await readFile(strmIndexFile, 'utf8')
@@ -861,23 +1060,57 @@ function normalizeStrmIndexEntry(entry) {
   }
 }
 
+let strmIndexMutationQueue = Promise.resolve()
+
+function mutateStrmIndex(mutator) {
+  const operation = strmIndexMutationQueue.then(async () => {
+    const currentEntries = await readStrmIndex()
+    const nextEntries = await mutator(currentEntries)
+    await writeStrmIndex(nextEntries)
+    return nextEntries
+  })
+
+  strmIndexMutationQueue = operation.catch(() => undefined)
+  return operation
+}
+
 async function upsertStrmIndexEntries(entries) {
   if (!entries.length) {
     return
   }
 
-  const currentEntries = await readStrmIndex()
-  const entriesByFile = new Map(
-    currentEntries
-      .filter((entry) => entry?.strmFile)
-      .map((entry) => [path.resolve(String(entry.strmFile)), entry]),
-  )
+  await mutateStrmIndex((currentEntries) => {
+    const entriesByFile = new Map(
+      currentEntries
+        .filter((entry) => entry?.strmFile)
+        .map((entry) => [path.resolve(String(entry.strmFile)), entry]),
+    )
 
-  for (const entry of entries.map(normalizeStrmIndexEntry)) {
-    entriesByFile.set(entry.strmFile, entry)
-  }
+    for (const entry of entries.map(normalizeStrmIndexEntry)) {
+      entriesByFile.set(entry.strmFile, entry)
+    }
 
-  await writeStrmIndex([...entriesByFile.values()])
+    return [...entriesByFile.values()]
+  })
+}
+
+async function replaceStrmIndexEntriesForTask(taskId, entries) {
+  const normalizedTaskId = String(taskId ?? '')
+  const normalizedEntries = entries.map(normalizeStrmIndexEntry)
+
+  await mutateStrmIndex((currentEntries) => {
+    const entriesByFile = new Map(
+      currentEntries
+        .filter((entry) => String(entry?.taskId ?? '') !== normalizedTaskId && entry?.strmFile)
+        .map((entry) => [path.resolve(String(entry.strmFile)), entry]),
+    )
+
+    for (const entry of normalizedEntries) {
+      entriesByFile.set(entry.strmFile, entry)
+    }
+
+    return [...entriesByFile.values()]
+  })
 }
 
 async function removeStrmIndexEntriesByFiles(strmFiles) {
@@ -887,8 +1120,7 @@ async function removeStrmIndexEntriesByFiles(strmFiles) {
     return
   }
 
-  const currentEntries = await readStrmIndex()
-  await writeStrmIndex(
+  await mutateStrmIndex((currentEntries) =>
     currentEntries.filter((entry) => !files.has(path.resolve(String(entry.strmFile ?? '')))),
   )
 }
@@ -1568,17 +1800,19 @@ function sortEntries(entries) {
 }
 
 async function requestOpenListApi(endpoint, apiPath, token, init = {}) {
-  const attempts = 3
+  const attempts = Number.isFinite(init.retryAttempts) ? Math.max(1, init.retryAttempts) : 3
+  const requestInit = { ...init }
+  delete requestInit.retryAttempts
   let lastError
 
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
       const response = await fetch(`${endpoint}${apiPath}`, {
-        ...init,
+        ...requestInit,
         headers: {
           Authorization: token,
-          ...(init.body ? { 'Content-Type': 'application/json' } : {}),
-          ...init.headers,
+          ...(requestInit.body ? { 'Content-Type': 'application/json' } : {}),
+          ...requestInit.headers,
         },
       })
 
@@ -1912,9 +2146,92 @@ async function browseStorage(payload) {
   throw new Error(`不支持的接入方式：${storage.accessMethod}`)
 }
 
-async function listStorageEntries(storage, currentPath) {
+async function listAllOpenListEntries(storage, browsePath) {
+  const endpoint = normalizeEndpoint(storage.endpoint)
+  const token = String(storage.openlist?.token ?? '').trim()
+
+  if (!endpoint || !token) {
+    throw new Error('OpenList / Alist 存储缺少服务地址或 Token')
+  }
+
+  const currentPath = normalizeRemotePath(
+    browsePath || storage.openlist?.basePath || storage.rootPath,
+  )
+  const entries = []
+  const perPage = 500
+  let page = 1
+
+  while (true) {
+    const list = await requestOpenListApi(endpoint, '/api/fs/list', token, {
+      body: JSON.stringify({
+        page,
+        password: '',
+        path: currentPath,
+        per_page: perPage,
+        refresh: false,
+      }),
+      method: 'POST',
+    })
+    const content = Array.isArray(list?.content) ? list.content : []
+
+    for (const entry of content) {
+      const name = String(entry.name ?? '').trim() || '(未命名)'
+      const kind = entry.is_dir ? 'folder' : 'file'
+
+      entries.push({
+        id: `${kind}:${joinRemotePath(currentPath, name)}`,
+        kind,
+        name,
+        path: joinRemotePath(currentPath, name),
+        size: entry.size,
+        updatedAt: entry.modified,
+      })
+    }
+
+    const total = Number.parseInt(String(list?.total ?? ''), 10)
+
+    if (content.length < perPage || (Number.isFinite(total) && entries.length >= total)) {
+      break
+    }
+
+    page += 1
+  }
+
+  return {
+    entries: sortEntries(entries),
+    path: currentPath,
+  }
+}
+
+async function listAllLocalEntries(storage, browsePath) {
+  const currentPath = resolveLocalBrowsePath(storage, browsePath)
+  const dirents = await readdir(currentPath, { withFileTypes: true })
+  const entries = await Promise.all(
+    dirents.map(async (dirent) => {
+      const entryPath = path.join(currentPath, dirent.name)
+      const entryStat = await stat(entryPath)
+      const kind = dirent.isDirectory() ? 'folder' : 'file'
+
+      return {
+        id: `${kind}:${entryPath}`,
+        kind,
+        name: dirent.name,
+        path: entryPath,
+        size: entryStat.size,
+        updatedAt: entryStat.mtime.toISOString(),
+      }
+    }),
+  )
+
+  return {
+    entries: sortEntries(entries),
+    path: currentPath,
+  }
+}
+
+async function listAllStorageEntries(storage, currentPath) {
   if (storage.accessMethod === 'openlist') {
-    return browseOpenList(storage, currentPath)
+    return listAllOpenListEntries(storage, currentPath)
   }
 
   if (storage.accessMethod === 'webdav') {
@@ -1922,10 +2239,2027 @@ async function listStorageEntries(storage, currentPath) {
   }
 
   if (storage.accessMethod === 'local') {
-    return browseLocal(storage, currentPath)
+    return listAllLocalEntries(storage, currentPath)
   }
 
   throw new Error(`不支持的接入方式：${storage.accessMethod}`)
+}
+
+function getStorageConfiguredRoot(storage) {
+  if (storage.accessMethod === 'local') {
+    const configuredRoot = String(
+      storage.local?.path ?? storage.rootPath ?? storage.endpoint ?? '',
+    ).trim()
+
+    if (!configuredRoot) {
+      throw new Error('本地文件缺少目录路径')
+    }
+
+    return path.resolve(configuredRoot)
+  }
+
+  if (storage.accessMethod === 'openlist') {
+    return normalizeStoragePath(storage, storage.openlist?.basePath || storage.rootPath || '/')
+  }
+
+  return normalizeStoragePath(storage, storage.rootPath || '/')
+}
+
+function normalizeStoragePath(storage, candidatePath) {
+  return storage.accessMethod === 'local'
+    ? path.resolve(String(candidatePath ?? ''))
+    : normalizeRemotePath(path.posix.normalize(normalizeRemotePath(candidatePath)))
+}
+
+function joinStoragePath(storage, basePath, name) {
+  return storage.accessMethod === 'local'
+    ? path.join(basePath, name)
+    : normalizeRemotePath(path.posix.join(normalizeRemotePath(basePath), name))
+}
+
+function getStoragePathName(storage, candidatePath) {
+  return storage.accessMethod === 'local'
+    ? path.basename(candidatePath)
+    : path.posix.basename(normalizeRemotePath(candidatePath))
+}
+
+function getStorageParentPath(storage, candidatePath) {
+  if (storage.accessMethod === 'local') {
+    return path.dirname(candidatePath)
+  }
+
+  const parentPath = path.posix.dirname(normalizeRemotePath(candidatePath))
+  return parentPath || '/'
+}
+
+function storagePathsEqual(storage, firstPath, secondPath) {
+  const first = normalizeStoragePath(storage, firstPath)
+  const second = normalizeStoragePath(storage, secondPath)
+
+  return storage.accessMethod === 'local' && process.platform === 'win32'
+    ? first.toLocaleLowerCase() === second.toLocaleLowerCase()
+    : first === second
+}
+
+function getStoragePathStateKey(storage, candidatePath) {
+  const normalized = normalizeStoragePath(storage, candidatePath)
+  return storage.accessMethod === 'local' && process.platform === 'win32'
+    ? normalized.toLocaleLowerCase()
+    : normalized
+}
+
+function storagePathStateHas(pathState, storage, candidatePath) {
+  return pathState?.has(getStoragePathStateKey(storage, candidatePath)) === true
+}
+
+function addStoragePathState(pathState, storage, candidatePath) {
+  const normalized = normalizeStoragePath(storage, candidatePath)
+  pathState?.set(getStoragePathStateKey(storage, normalized), normalized)
+}
+
+function deleteStoragePathState(pathState, storage, candidatePath) {
+  pathState?.delete(getStoragePathStateKey(storage, candidatePath))
+}
+
+function moveStoragePathState(pathState, storage, sourcePath, targetPath) {
+  if (!pathState) {
+    return
+  }
+
+  const normalizedSource = normalizeStoragePath(storage, sourcePath)
+  const normalizedTarget = normalizeStoragePath(storage, targetPath)
+  const affectedPaths = [...pathState.values()].filter((candidatePath) =>
+    storage.accessMethod === 'local'
+      ? isLocalPathInside(candidatePath, normalizedSource)
+      : isRemotePathInside(candidatePath, normalizedSource),
+  )
+
+  for (const candidatePath of affectedPaths) {
+    const relativePath =
+      storage.accessMethod === 'local'
+        ? path.relative(normalizedSource, candidatePath)
+        : path.posix.relative(normalizedSource, candidatePath)
+    const nextPath = relativePath
+      ? storage.accessMethod === 'local'
+        ? path.join(normalizedTarget, relativePath)
+        : normalizeRemotePath(path.posix.join(normalizedTarget, relativePath))
+      : normalizedTarget
+    deleteStoragePathState(pathState, storage, candidatePath)
+    addStoragePathState(pathState, storage, nextPath)
+  }
+}
+
+function assertStoragePathInside(storage, candidatePath, operationRoot) {
+  const configuredRoot = getStorageConfiguredRoot(storage)
+  const normalizedCandidate = normalizeStoragePath(storage, candidatePath)
+  const normalizedOperationRoot = normalizeStoragePath(storage, operationRoot)
+
+  if (storage.accessMethod === 'local') {
+    if (
+      !isLocalPathInside(normalizedOperationRoot, configuredRoot) ||
+      !isLocalPathInside(normalizedCandidate, configuredRoot) ||
+      !isLocalPathInside(normalizedCandidate, normalizedOperationRoot)
+    ) {
+      throw new Error('本地源路径或目标路径超出存储根目录')
+    }
+
+    return normalizedCandidate
+  }
+
+  if (
+    !isRemotePathInside(normalizedOperationRoot, configuredRoot) ||
+    !isRemotePathInside(normalizedCandidate, configuredRoot) ||
+    !isRemotePathInside(normalizedCandidate, normalizedOperationRoot)
+  ) {
+    throw new Error('远程源路径或目标路径超出存储根目录')
+  }
+
+  return normalizedCandidate
+}
+
+function getWebDavAuthHeaders(storage) {
+  const headers = {}
+  const username = String(storage.webdav?.username ?? '').trim()
+  const password = String(storage.webdav?.password ?? '').trim()
+
+  if (username || password) {
+    headers.Authorization = `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}`
+  }
+
+  return headers
+}
+
+async function storageEntryExists(storage, candidatePath) {
+  if (storage.accessMethod === 'local') {
+    return pathExists(candidatePath)
+  }
+
+  if (storage.accessMethod === 'openlist') {
+    const endpoint = normalizeEndpoint(storage.endpoint)
+    const token = String(storage.openlist?.token ?? '').trim()
+
+    try {
+      await requestOpenListApi(endpoint, '/api/fs/get', token, {
+        body: JSON.stringify({ password: '', path: normalizeRemotePath(candidatePath) }),
+        method: 'POST',
+        retryAttempts: 1,
+      })
+      return true
+    } catch (error) {
+      if (/HTTP 404|not found|object not found/i.test(String(error?.message ?? ''))) {
+        return false
+      }
+
+      throw error
+    }
+  }
+
+  let response = await fetch(joinEndpointAndPath(storage.endpoint, candidatePath), {
+    headers: getWebDavAuthHeaders(storage),
+    method: 'HEAD',
+  })
+
+  if (response.status === 405) {
+    response = await fetch(joinEndpointAndPath(storage.endpoint, candidatePath), {
+      body: '<?xml version="1.0" encoding="utf-8"?><propfind xmlns="DAV:"><prop><resourcetype/></prop></propfind>',
+      headers: {
+        ...getWebDavAuthHeaders(storage),
+        Depth: '0',
+        'Content-Type': 'application/xml; charset=utf-8',
+      },
+      method: 'PROPFIND',
+    })
+  }
+
+  if (response.status === 404) {
+    return false
+  }
+
+  if (!response.ok) {
+    throw new Error(`WebDAV 路径检查失败: HTTP ${response.status}`)
+  }
+
+  return true
+}
+
+async function createStorageDirectory(storage, directoryPath) {
+  if (storage.accessMethod === 'local') {
+    await mkdir(directoryPath, { recursive: true })
+    return
+  }
+
+  if (storage.accessMethod === 'openlist') {
+    await requestOpenListApi(
+      normalizeEndpoint(storage.endpoint),
+      '/api/fs/mkdir',
+      String(storage.openlist?.token ?? '').trim(),
+      {
+        body: JSON.stringify({ path: normalizeRemotePath(directoryPath) }),
+        method: 'POST',
+      },
+    )
+    return
+  }
+
+  const response = await fetch(joinEndpointAndPath(storage.endpoint, directoryPath), {
+    headers: getWebDavAuthHeaders(storage),
+    method: 'MKCOL',
+  })
+
+  if (!response.ok && response.status !== 405) {
+    throw new Error(`WebDAV 创建目录失败: HTTP ${response.status}`)
+  }
+}
+
+async function ensureStorageDirectory(storage, directoryPath, operationRoot, pathState) {
+  const normalizedTarget = assertStoragePathInside(storage, directoryPath, operationRoot)
+
+  if (
+    storagePathStateHas(pathState, storage, normalizedTarget) ||
+    (!pathState && (await storageEntryExists(storage, normalizedTarget)))
+  ) {
+    return
+  }
+
+  const parentPath = getStorageParentPath(storage, normalizedTarget)
+
+  if (
+    !storagePathsEqual(storage, parentPath, normalizedTarget) &&
+    !storagePathsEqual(storage, parentPath, operationRoot)
+  ) {
+    await ensureStorageDirectory(storage, parentPath, operationRoot, pathState)
+  }
+
+  await createStorageDirectory(storage, normalizedTarget)
+  addStoragePathState(pathState, storage, normalizedTarget)
+}
+
+async function moveWebDavEntry(storage, sourcePath, targetPath) {
+  const destination = joinEndpointAndPath(storage.endpoint, targetPath)
+  const response = await fetch(joinEndpointAndPath(storage.endpoint, sourcePath), {
+    headers: {
+      ...getWebDavAuthHeaders(storage),
+      Destination: destination,
+      Overwrite: 'F',
+    },
+    method: 'MOVE',
+  })
+
+  if (!response.ok) {
+    throw new Error(`WebDAV 移动或重命名失败: HTTP ${response.status}`)
+  }
+}
+
+async function renameStorageEntry(storage, sourcePath, newName) {
+  if (!isValidRenameBasename(newName)) {
+    throw new Error(`无效的新名称：${newName || '(空)'}`)
+  }
+
+  const targetPath = joinStoragePath(storage, getStorageParentPath(storage, sourcePath), newName)
+
+  if (storage.accessMethod === 'local') {
+    await rename(sourcePath, targetPath)
+    return targetPath
+  }
+
+  if (storage.accessMethod === 'openlist') {
+    await requestOpenListApi(
+      normalizeEndpoint(storage.endpoint),
+      '/api/fs/rename',
+      String(storage.openlist?.token ?? '').trim(),
+      {
+        body: JSON.stringify({
+          name: newName,
+          overwrite: false,
+          path: normalizeRemotePath(sourcePath),
+        }),
+        method: 'POST',
+      },
+    )
+    return targetPath
+  }
+
+  await moveWebDavEntry(storage, sourcePath, targetPath)
+  return targetPath
+}
+
+async function moveStorageEntry(storage, sourcePath, destinationDirectory) {
+  const name = getStoragePathName(storage, sourcePath)
+  const targetPath = joinStoragePath(storage, destinationDirectory, name)
+
+  if (storage.accessMethod === 'local') {
+    await rename(sourcePath, targetPath)
+    return targetPath
+  }
+
+  if (storage.accessMethod === 'openlist') {
+    await requestOpenListApi(
+      normalizeEndpoint(storage.endpoint),
+      '/api/fs/move',
+      String(storage.openlist?.token ?? '').trim(),
+      {
+        body: JSON.stringify({
+          dst_dir: normalizeRemotePath(destinationDirectory),
+          names: [name],
+          overwrite: false,
+          src_dir: normalizeRemotePath(getStorageParentPath(storage, sourcePath)),
+        }),
+        method: 'POST',
+      },
+    )
+    return targetPath
+  }
+
+  await moveWebDavEntry(storage, sourcePath, targetPath)
+  return targetPath
+}
+
+const aiRenameJobs = new Map()
+const activeAiRenameJobsByStorage = new Map()
+
+function getAiRenameChatCompletionsUrl(baseUrl) {
+  const normalized = normalizeEndpoint(baseUrl)
+
+  if (!normalized) {
+    throw new Error('请先配置 AI Base URL')
+  }
+
+  return normalized.endsWith('/chat/completions') ? normalized : `${normalized}/chat/completions`
+}
+
+function getAiRenameModelsUrl(baseUrl) {
+  const normalized = normalizeEndpoint(baseUrl)
+
+  if (!normalized) {
+    throw new Error('请先配置 AI Base URL')
+  }
+
+  if (normalized.endsWith('/chat/completions')) {
+    return `${normalized.slice(0, -'/chat/completions'.length)}/models`
+  }
+
+  return normalized.endsWith('/models') ? normalized : `${normalized}/models`
+}
+
+function getChatMessageContent(payload) {
+  const content = payload?.choices?.[0]?.message?.content
+
+  if (Array.isArray(content)) {
+    return content
+      .map((item) => (typeof item === 'string' ? item : String(item?.text ?? '')))
+      .join('')
+  }
+
+  return String(content ?? '')
+}
+
+async function requestAiChatCompletion(aiSettings, messages, options = {}) {
+  const apiKey = String(aiSettings.apiKey ?? '').trim()
+  const model = String(aiSettings.model ?? '').trim()
+
+  if (!apiKey) {
+    throw new Error('请先配置 AI API Key')
+  }
+
+  if (!model) {
+    throw new Error('请先配置 AI 模型')
+  }
+
+  const requestUrl = getAiRenameChatCompletionsUrl(aiSettings.baseUrl)
+  const customParameters = parseAiRenameCustomParameters(aiSettings.customParameters)
+  const requestWithJsonMode = async (jsonMode) => {
+    let lastError
+
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      if (options.signal?.aborted) {
+        throw new Error('AI 重命名任务已取消')
+      }
+
+      try {
+        const response = await fetch(requestUrl, {
+          body: JSON.stringify({
+            temperature: 0.1,
+            ...customParameters,
+            messages,
+            model,
+            stream: false,
+            ...(jsonMode ? { response_format: { type: 'json_object' } } : {}),
+          }),
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+          },
+          method: 'POST',
+          signal: options.signal,
+        })
+        const text = await response.text()
+        let payload
+
+        try {
+          payload = text ? JSON.parse(text) : {}
+        } catch {
+          payload = {}
+        }
+
+        if (response.ok) {
+          const content = getChatMessageContent(payload)
+
+          if (!content) {
+            throw new Error('AI 接口未返回 choices[0].message.content')
+          }
+
+          return options.includeMetadata ? { content, payload } : content
+        }
+
+        const errorMessage = String(
+          payload?.error?.message || payload?.message || text || `HTTP ${response.status}`,
+        ).slice(0, 800)
+        const error = new Error(`AI 接口请求失败: ${errorMessage}`)
+        error.statusCode = response.status
+        lastError = error
+
+        if (response.status !== 429 && response.status < 500) {
+          throw error
+        }
+      } catch (error) {
+        if (options.signal?.aborted) {
+          throw new Error('AI 重命名任务已取消')
+        }
+
+        lastError = error
+
+        if (error?.statusCode && error.statusCode !== 429 && error.statusCode < 500) {
+          throw error
+        }
+      }
+
+      if (attempt < 3) {
+        await sleep(400 * attempt)
+      }
+    }
+
+    throw lastError
+  }
+
+  try {
+    return await requestWithJsonMode(true)
+  } catch (error) {
+    if (error?.statusCode !== 400 && !/response.?format|json.?mode/i.test(error?.message ?? '')) {
+      throw error
+    }
+
+    return requestWithJsonMode(false)
+  }
+}
+
+function resolveAiRenameSettingsValues(currentSettings, values = {}) {
+  const current = normalizeAiRenameSettings(currentSettings)
+  const clearApiKey = values.clearApiKey === true
+  const clearTmdbToken = values.clearTmdbToken === true
+  const providedApiKey = String(values.apiKey ?? '').trim()
+  const providedTmdbToken = String(values.tmdbToken ?? '').trim()
+
+  if (Object.hasOwn(values, 'customParameters')) {
+    parseAiRenameCustomParameters(values.customParameters, { strict: true })
+  }
+
+  return normalizeAiRenameSettings({
+    ...current,
+    ...values,
+    apiKey: clearApiKey ? '' : providedApiKey || current.apiKey,
+    tmdbToken: clearTmdbToken ? '' : providedTmdbToken || current.tmdbToken,
+  })
+}
+
+async function saveAiRenameSettings(values, baseUrl = '') {
+  const settings = await readSettings(baseUrl)
+  const aiRename = resolveAiRenameSettingsValues(settings.aiRename, values)
+  await updateSettingsSection('aiRename', aiRename, baseUrl)
+  return getAiRenameSettingsForClient(aiRename)
+}
+
+async function discoverAiRenameModels(values, baseUrl = '') {
+  const settings = await readSettings(baseUrl)
+  const aiRename = resolveAiRenameSettingsValues(settings.aiRename, values)
+
+  if (!aiRename.apiKey) {
+    throw new Error('请先配置 AI API Key')
+  }
+
+  const response = await fetch(getAiRenameModelsUrl(aiRename.baseUrl), {
+    headers: { Authorization: `Bearer ${aiRename.apiKey}` },
+  })
+  const text = await response.text()
+  let payload
+
+  try {
+    payload = text ? JSON.parse(text) : {}
+  } catch {
+    payload = {}
+  }
+
+  if (!response.ok) {
+    const message = String(
+      payload?.error?.message || payload?.message || text || `HTTP ${response.status}`,
+    ).slice(0, 800)
+    const error = new Error(`AI 模型探测失败: ${message}`)
+    error.statusCode = response.status
+    throw error
+  }
+
+  const sourceModels = Array.isArray(payload?.data)
+    ? payload.data
+    : Array.isArray(payload?.models)
+      ? payload.models
+      : []
+  const models = [
+    ...new Map(
+      sourceModels
+        .map((item) => {
+          if (typeof item === 'string') {
+            return { id: item.trim(), ownedBy: '' }
+          }
+
+          return {
+            id: String(item?.id || item?.name || '').trim(),
+            ownedBy: String(item?.owned_by || item?.ownedBy || '').trim(),
+          }
+        })
+        .filter((item) => item.id)
+        .map((item) => [item.id, item]),
+    ).values(),
+  ].sort((first, second) => first.id.localeCompare(second.id, 'en'))
+
+  if (models.length === 0) {
+    throw new Error('接口已响应，但未返回可用模型；仍可手动输入模型名称')
+  }
+
+  return {
+    count: models.length,
+    message: `已探测到 ${models.length} 个模型`,
+    models,
+    ok: true,
+  }
+}
+
+async function testAiRenameConnection(values, baseUrl = '') {
+  const settings = await readSettings(baseUrl)
+  const aiRename = resolveAiRenameSettingsValues(settings.aiRename, values)
+  const startedAt = Date.now()
+  const result = await requestAiChatCompletion(
+    aiRename,
+    [
+      {
+        content:
+          'Return one JSON object only. It must be exactly {"ok":true,"service":"ai-rename","probe":"speed-test-0123456789"}.',
+        role: 'user',
+      },
+    ],
+    { includeMetadata: true },
+  )
+  const latencyMs = Math.max(1, Date.now() - startedAt)
+  const content = result.content
+  const parsed = parseAiJsonContent(content)
+
+  if (parsed?.ok !== true) {
+    throw new Error('AI 接口已响应，但未按要求返回 JSON')
+  }
+
+  const reportedCompletionTokens = Number(
+    result.payload?.usage?.completion_tokens ?? result.payload?.usage?.output_tokens,
+  )
+  const tokenCountEstimated =
+    !Number.isFinite(reportedCompletionTokens) || reportedCompletionTokens <= 0
+  const completionTokens = tokenCountEstimated
+    ? Math.max(1, Math.ceil(Array.from(content).length / 4))
+    : reportedCompletionTokens
+  const tokensPerSecond = Number((completionTokens / (latencyMs / 1000)).toFixed(2))
+
+  return {
+    message: 'AI 模型可用性测试通过',
+    completionTokens,
+    latencyMs,
+    model: aiRename.model,
+    ok: true,
+    tokenCountEstimated,
+    tokensPerSecond,
+  }
+}
+
+async function testTmdbConnection(values, baseUrl = '') {
+  const settings = await readSettings(baseUrl)
+  const aiRename = resolveAiRenameSettingsValues(settings.aiRename, values)
+
+  if (!aiRename.tmdbToken) {
+    throw new Error('请先配置 TMDB Read Access Token')
+  }
+
+  const startedAt = Date.now()
+  const response = await fetch(`${aiRename.tmdbBaseUrl}/configuration`, {
+    headers: { Authorization: `Bearer ${aiRename.tmdbToken}` },
+  })
+  const latencyMs = Math.max(1, Date.now() - startedAt)
+
+  if (!response.ok) {
+    const text = await response.text()
+    throw new Error(`TMDB 连接失败: ${String(text || `HTTP ${response.status}`).slice(0, 800)}`)
+  }
+
+  return {
+    latencyMs,
+    message: 'TMDB 连接测试通过',
+    ok: true,
+  }
+}
+
+function getAiRenameJobRoute(requestUrl) {
+  const pathname = new URL(requestUrl || '/', 'http://localhost').pathname
+  const match = pathname.match(/^\/api\/storage\/ai-rename\/jobs\/([^/]+)(?:\/(cancel))?$/)
+
+  if (!match) {
+    return undefined
+  }
+
+  return {
+    action: match[2] ?? '',
+    jobId: decodeURIComponent(match[1]),
+  }
+}
+
+function getAiRenameJobForClient(job) {
+  return {
+    allowMove: job.allowMove,
+    createdAt: job.createdAt,
+    currentPath: job.currentPath,
+    finishedAt: job.finishedAt,
+    id: job.id,
+    message: job.message,
+    path: job.path,
+    progress: { ...job.progress },
+    results: job.results.map((result) => ({ ...result })),
+    stage: job.stage,
+    startedAt: job.startedAt,
+    status: job.status,
+    storageId: job.storageId,
+    taskId: job.taskId,
+    useTmdb: job.useTmdb,
+  }
+}
+
+function setAiRenameJobStage(job, stage, message) {
+  job.stage = stage
+  job.message = message
+}
+
+function appendAiRenameJobResult(job, result, countAs = '') {
+  job.results.push({
+    at: new Date().toISOString(),
+    ...result,
+  })
+
+  if (job.results.length > 2000) {
+    job.results.splice(0, job.results.length - 2000)
+  }
+
+  if (countAs === 'succeeded') {
+    job.progress.succeeded += 1
+    job.progress.completedOperations += 1
+  } else if (countAs === 'skipped') {
+    job.progress.skipped += 1
+    job.progress.completedOperations += 1
+  } else if (countAs === 'failed') {
+    job.progress.failed += 1
+    job.progress.completedOperations += 1
+  } else if (countAs === 'ignored') {
+    job.progress.ignored += 1
+    job.progress.completedOperations += 1
+  }
+}
+
+function throwIfAiRenameCancelled(job) {
+  if (job.cancelRequested || job.abortController.signal.aborted) {
+    throw new Error('AI_RENAME_CANCELLED')
+  }
+}
+
+function getRelativeStoragePath(storage, rootPath, candidatePath) {
+  return storage.accessMethod === 'local'
+    ? path.relative(rootPath, candidatePath).replaceAll('\\', '/')
+    : path.posix.relative(normalizeRemotePath(rootPath), normalizeRemotePath(candidatePath))
+}
+
+async function scanAiRenameTree(storage, requestedPath, job, extensionSets) {
+  const operationRoot = normalizeStoragePath(
+    storage,
+    storage.accessMethod === 'local'
+      ? resolveLocalBrowsePath(storage, requestedPath)
+      : normalizeRemotePath(requestedPath),
+  )
+  assertStoragePathInside(storage, operationRoot, operationRoot)
+
+  const queue = [{ depth: 0, path: operationRoot, topId: '' }]
+  const entries = []
+  const pathState = new Map()
+  addStoragePathState(pathState, storage, operationRoot)
+  let idCounter = 0
+
+  while (queue.length > 0) {
+    throwIfAiRenameCancelled(job)
+    const current = queue.shift()
+    job.currentPath = current.path
+    const result = await listAllStorageEntries(storage, current.path)
+
+    for (const entry of result.entries) {
+      throwIfAiRenameCancelled(job)
+      assertStoragePathInside(storage, entry.path, operationRoot)
+      idCounter += 1
+      const id = `entry-${idCounter}`
+      const depth = current.depth + 1
+      const topId =
+        current.depth === 0 ? (entry.kind === 'folder' ? id : '__root_files__') : current.topId
+      const extension = getLowerExtension(entry.name)
+      const scannedEntry = {
+        depth,
+        eligible:
+          entry.kind === 'folder' ||
+          isMediaFileName(entry.name, extensionSets) ||
+          isSidecarFileName(entry.name, extensionSets),
+        extension,
+        id,
+        kind: entry.kind,
+        name: entry.name,
+        path: entry.path,
+        relativePath: getRelativeStoragePath(storage, operationRoot, entry.path),
+        topId,
+      }
+
+      entries.push(scannedEntry)
+      addStoragePathState(pathState, storage, entry.path)
+      job.progress.scanned += 1
+
+      if (entry.kind === 'folder') {
+        queue.push({ depth, path: entry.path, topId })
+      }
+    }
+  }
+
+  job.currentPath = operationRoot
+  return { entries, operationRoot, pathState }
+}
+
+function createAiRenameInventoryPrompt(
+  groupRecords,
+  rootNames,
+  additionalInstructions,
+  promptTemplate,
+) {
+  const inventory = groupRecords.map(({ groupEntries, groupId }) => ({
+    directoryName: getTopEntryForPlan(groupEntries)?.name ?? '当前目录文件',
+    directoryPath: getTopEntryForPlan(groupEntries)?.relativePath ?? '.',
+    entries: groupEntries.map((entry) => ({
+      depth: entry.depth,
+      eligible: entry.eligible,
+      id: entry.id,
+      kind: entry.kind,
+      name: entry.name,
+      relativePath: entry.relativePath,
+    })),
+    groupId,
+  }))
+
+  return [
+    String(promptTemplate || defaultAiRenamePromptTemplate).trim(),
+    '你是电视剧媒体库命名分析器。下方是一次性汇总的全部视频目录清单，需要在一次回复中完成所有目录的识别。只输出一个 JSON 对象，不要输出 Markdown。',
+    '不要返回路径或 newName；后端会根据结构化字段生成安全名称。',
+    '输出结构：{"groups":[{"groupId":"输入的 groupId","series":{"titleZh":"简体中文正式名","titleOriginal":"官方或通用英文名","year":2013,"season":1},"items":[...]}]}。',
+    'titleOriginal 是英文显示名字段，即使剧集原始语种是韩文、日文或其他语言，也必须返回官方或通用英文名，不得返回非英文原名。',
+    '后端会固定生成 Emby 标准结构：“剧集显示名 (首播年份)/Season 01/剧集显示名 - S01E01.ext”；特别篇使用 Season 00/S00E01，多集使用 S01E01-E02。',
+    '每个输入 groupId 必须在 groups 中恰好返回一次；不得合并、拆分或遗漏目录。',
+    'items 中每项必须使用输入 id。role 只能是 series-folder、season-folder、episode、sidecar、poster、fanart、tvshow-nfo、season-nfo、season-poster、ignore。',
+    'episode 项包含 season、episodes（数字数组），可选 version（如 v2）和 part。',
+    'sidecar 项必须用 sidecarFor 指向对应 episode id；字幕可提供 language、forced、hearingImpaired。',
+    '每个 eligible 文件或文件夹都应返回一项；广告图片、网站宣传图、无法可靠识别项使用 ignore。',
+    '顶层单季目录标为 season-folder；包含多个季目录的剧集容器标为 series-folder；子季目录标为 season-folder。',
+    '必须结合文件内容纠正目录里的错误季号，例如目录写 S01、文件写 S06 时以文件为准。',
+    `当前根目录的顶层名称：${JSON.stringify(rootNames)}`,
+    additionalInstructions ? `用户补充说明：${additionalInstructions.slice(0, 2000)}` : '',
+    `待识别媒体目录清单：${JSON.stringify(inventory)}`,
+  ]
+    .filter(Boolean)
+    .join('\n')
+}
+
+async function classifyAiRenameInventory(aiSettings, groupRecords, rootNames, job, extraPrompt) {
+  const content = await requestAiChatCompletion(
+    aiSettings,
+    [
+      {
+        content:
+          'You classify TV-series folders and files into structured metadata for a deterministic media-library renamer. Return JSON only.',
+        role: 'system',
+      },
+      {
+        content: createAiRenameInventoryPrompt(
+          groupRecords,
+          rootNames,
+          extraPrompt,
+          aiSettings.promptTemplate,
+        ),
+        role: 'user',
+      },
+    ],
+    { signal: job.abortController.signal },
+  )
+
+  const payload = parseAiJsonContent(content)
+
+  if (!Array.isArray(payload?.groups)) {
+    throw new Error('AI 返回结构无效：缺少 groups 数组')
+  }
+
+  const expectedGroupIds = new Set(groupRecords.map((record) => record.groupId))
+  const suggestions = new Map()
+
+  for (const suggestion of payload.groups) {
+    const groupId = String(suggestion?.groupId ?? '').trim()
+
+    if (!groupId || !expectedGroupIds.has(groupId)) {
+      continue
+    }
+
+    if (suggestions.has(groupId)) {
+      suggestions.set(groupId, { error: `AI 重复返回目录 ${groupId}` })
+      continue
+    }
+
+    suggestions.set(groupId, { payload: suggestion })
+  }
+
+  return suggestions
+}
+
+async function verifySeriesWithTmdb(series, aiSettings, job) {
+  if (!aiSettings.tmdbEnabled || !aiSettings.tmdbToken) {
+    return { series }
+  }
+
+  const query = series.titleOriginal || series.titleZh
+
+  if (!query) {
+    return { series, warning: 'TMDB 校验已跳过：缺少查询标题' }
+  }
+
+  const queryTitles = new Set(
+    [series.titleZh, series.titleOriginal, query].map(normalizeComparableTitle).filter(Boolean),
+  )
+  const findUniqueMatches = (payload) => {
+    const exactMatches = (Array.isArray(payload?.results) ? payload.results : []).filter(
+      (candidate) => {
+        const candidateTitles = [candidate.name, candidate.original_name]
+          .map(normalizeComparableTitle)
+          .filter(Boolean)
+        const candidateYear = Number.parseInt(
+          String(candidate.first_air_date ?? '').slice(0, 4),
+          10,
+        )
+        const yearMatches =
+          !series.year || !Number.isFinite(candidateYear) || candidateYear === series.year
+
+        return yearMatches && candidateTitles.some((title) => queryTitles.has(title))
+      },
+    )
+
+    return [...new Map(exactMatches.map((candidate) => [candidate.id, candidate])).values()]
+  }
+  const search = async (language) => {
+    const searchUrl = new URL(`${aiSettings.tmdbBaseUrl}/search/tv`)
+    searchUrl.searchParams.set('query', query)
+    searchUrl.searchParams.set('language', language)
+    searchUrl.searchParams.set('include_adult', 'false')
+
+    if (series.year) {
+      searchUrl.searchParams.set('first_air_date_year', String(series.year))
+    }
+
+    const response = await fetch(searchUrl, {
+      headers: { Authorization: `Bearer ${aiSettings.tmdbToken}` },
+      signal: job.abortController.signal,
+    })
+
+    return {
+      payload: response.ok ? await response.json() : undefined,
+      status: response.status,
+    }
+  }
+  const localizedSearch = await search(aiSettings.tmdbLanguage)
+
+  if (!localizedSearch.payload && aiSettings.tmdbLanguage.toLowerCase() === 'en-us') {
+    return { series, warning: `TMDB 搜索失败: HTTP ${localizedSearch.status}` }
+  }
+
+  let uniqueMatches = findUniqueMatches(localizedSearch.payload)
+
+  if (uniqueMatches.length !== 1 && aiSettings.tmdbLanguage.toLowerCase() !== 'en-us') {
+    const englishSearch = await search('en-US')
+
+    if (englishSearch.payload) {
+      uniqueMatches = findUniqueMatches(englishSearch.payload)
+    } else if (!localizedSearch.payload) {
+      return { series, warning: `TMDB 搜索失败: HTTP ${englishSearch.status}` }
+    }
+  }
+
+  if (uniqueMatches.length !== 1) {
+    return {
+      series,
+      warning:
+        uniqueMatches.length === 0
+          ? `TMDB 未找到唯一匹配：${query}`
+          : `TMDB 存在多个匹配，已保留 AI 结果：${query}`,
+    }
+  }
+
+  const match = uniqueMatches[0]
+  const fetchDetails = async (language) => {
+    const response = await fetch(
+      `${aiSettings.tmdbBaseUrl}/tv/${encodeURIComponent(match.id)}?language=${encodeURIComponent(language)}`,
+      {
+        headers: { Authorization: `Bearer ${aiSettings.tmdbToken}` },
+        signal: job.abortController.signal,
+      },
+    )
+
+    return response.ok ? response.json() : undefined
+  }
+  const details = (await fetchDetails(aiSettings.tmdbLanguage)) ?? match
+  const englishDetails =
+    aiSettings.tmdbLanguage.toLowerCase() === 'en-us'
+      ? details
+      : ((await fetchDetails('en-US')) ?? details)
+  const titleOriginalCandidates = [
+    englishDetails.name,
+    series.titleOriginal,
+    match.name,
+    details.original_name,
+    match.original_name,
+  ]
+    .map((value) => String(value ?? '').trim())
+    .filter(Boolean)
+  const englishTitle =
+    titleOriginalCandidates.find((value) => /[A-Za-z]/.test(value)) ?? titleOriginalCandidates[0]
+  const verified = normalizeSeriesMetadata({
+    ...series,
+    titleOriginal: englishTitle,
+    titleZh: details.name || match.name || series.titleZh,
+    year:
+      Number.parseInt(
+        String(details.first_air_date || match.first_air_date || '').slice(0, 4),
+        10,
+      ) || series.year,
+  })
+
+  return { series: verified }
+}
+
+function getTopEntryForPlan(entries) {
+  return entries.find((entry) => entry.depth === 1 && entry.kind === 'folder')
+}
+
+function buildAiRenameGroupPlan(groupEntries, classification, extensionSets, operationRoot) {
+  const entryById = new Map(groupEntries.map((entry) => [entry.id, entry]))
+  const classifiedItems = classification.items.filter((item) => entryById.has(item.id))
+  const itemById = new Map(classifiedItems.map((item) => [item.id, item]))
+  const mediaNamesById = new Map()
+  const operations = []
+  const topEntry = getTopEntryForPlan(groupEntries)
+  const topItem = topEntry ? itemById.get(topEntry.id) : undefined
+
+  for (const item of classifiedItems) {
+    const entry = entryById.get(item.id)
+
+    if (
+      entry?.kind !== 'file' ||
+      item.role !== 'episode' ||
+      !isMediaFileName(entry.name, extensionSets)
+    ) {
+      continue
+    }
+
+    const resolvedItem = {
+      ...item,
+      season: item.season ?? classification.series.season,
+    }
+    const newName = renderEpisodeFileName(classification.series, resolvedItem, entry.name)
+
+    if (newName && isValidRenameBasename(newName)) {
+      mediaNamesById.set(item.id, newName)
+      operations.push({
+        depth: entry.depth,
+        entryId: entry.id,
+        kind: 'file',
+        newName,
+        oldName: entry.name,
+        sourcePath: entry.path,
+        type: 'rename',
+      })
+    }
+  }
+
+  for (const item of classifiedItems) {
+    const entry = entryById.get(item.id)
+
+    if (!entry || entry.kind !== 'file' || item.role === 'episode' || item.role === 'ignore') {
+      continue
+    }
+
+    if (!isSidecarFileName(entry.name, extensionSets)) {
+      continue
+    }
+
+    const newName = renderSidecarFileName(
+      classification.series,
+      { ...item, season: item.season ?? classification.series.season },
+      entry.name,
+      mediaNamesById,
+    )
+
+    if (newName && isValidRenameBasename(newName)) {
+      operations.push({
+        depth: entry.depth,
+        entryId: entry.id,
+        kind: 'file',
+        newName,
+        oldName: entry.name,
+        sourcePath: entry.path,
+        type: 'rename',
+      })
+    }
+  }
+
+  for (const item of classifiedItems) {
+    const entry = entryById.get(item.id)
+
+    if (!entry || entry.kind !== 'folder' || item.role === 'ignore') {
+      continue
+    }
+
+    const newName = renderFolderName(
+      classification.series,
+      { ...item, season: item.season ?? classification.series.season },
+      entry.depth === 1,
+    )
+
+    if (newName && isValidRenameBasename(newName)) {
+      operations.push({
+        depth: entry.depth,
+        entryId: entry.id,
+        isTopFolder: entry.id === topEntry?.id,
+        kind: 'folder',
+        newName,
+        oldName: entry.name,
+        sourcePath: entry.path,
+        type: 'rename',
+      })
+    }
+  }
+
+  const nestedSeasonFolders = classifiedItems.filter((item) => {
+    const entry = entryById.get(item.id)
+    return entry?.kind === 'folder' && entry.depth > 1 && item.role === 'season-folder'
+  })
+  const topRole =
+    topItem?.role ||
+    (topEntry
+      ? nestedSeasonFolders.length > 0
+        ? 'series-folder'
+        : classification.series.season !== undefined
+          ? 'season-folder'
+          : ''
+      : '')
+  const topSeason = topItem?.season ?? classification.series.season
+
+  return {
+    classification,
+    entries: groupEntries,
+    entryById,
+    itemById,
+    operationRoot,
+    operations,
+    seriesKey: `${normalizeComparableTitle(formatSeriesTitle(classification.series, false))}:${classification.series.year ?? ''}`,
+    seriesTitle: formatSeriesTitle(classification.series, true),
+    topEntry,
+    topRole,
+    topSeason,
+  }
+}
+
+function markDuplicateRenameTargets(storage, plans) {
+  const operationsByTarget = new Map()
+
+  for (const plan of plans) {
+    for (const operation of plan.operations) {
+      const targetPath = joinStoragePath(
+        storage,
+        getStorageParentPath(storage, operation.sourcePath),
+        operation.newName,
+      )
+      const normalizedTarget = normalizeStoragePath(storage, targetPath)
+      const key =
+        storage.accessMethod === 'local' && process.platform === 'win32'
+          ? normalizedTarget.toLocaleLowerCase()
+          : normalizedTarget
+      const existing = operationsByTarget.get(key)
+
+      if (existing && !storagePathsEqual(storage, existing.sourcePath, operation.sourcePath)) {
+        existing.invalidReason = '多个条目生成了相同目标名称'
+        operation.invalidReason = '多个条目生成了相同目标名称'
+      } else {
+        operationsByTarget.set(key, operation)
+      }
+    }
+  }
+}
+
+async function executeAiRenameOperation(job, storage, operationRoot, operation) {
+  throwIfAiRenameCancelled(job)
+  job.currentPath = operation.sourcePath
+
+  if (operation.invalidReason) {
+    appendAiRenameJobResult(
+      job,
+      {
+        action: operation.type,
+        message: operation.invalidReason,
+        oldPath: operation.sourcePath,
+        status: 'skipped',
+      },
+      'skipped',
+    )
+    return ''
+  }
+
+  if (!isValidRenameBasename(operation.newName)) {
+    appendAiRenameJobResult(
+      job,
+      {
+        action: operation.type,
+        message: 'AI 生成的名称未通过安全校验',
+        oldPath: operation.sourcePath,
+        status: 'skipped',
+      },
+      'skipped',
+    )
+    return ''
+  }
+
+  const sourcePath = assertStoragePathInside(storage, operation.sourcePath, operationRoot)
+  const targetPath = assertStoragePathInside(
+    storage,
+    joinStoragePath(storage, getStorageParentPath(storage, sourcePath), operation.newName),
+    operationRoot,
+  )
+
+  if (storagePathsEqual(storage, sourcePath, targetPath) && sourcePath === targetPath) {
+    operation.currentPath = sourcePath
+    appendAiRenameJobResult(
+      job,
+      {
+        action: operation.type,
+        message: '名称无需修改',
+        oldPath: sourcePath,
+        status: 'ignored',
+      },
+      'ignored',
+    )
+    return sourcePath
+  }
+
+  try {
+    if (
+      !storagePathStateHas(job.pathState, storage, sourcePath) &&
+      !(await storageEntryExists(storage, sourcePath))
+    ) {
+      throw new Error('源条目已不存在')
+    }
+
+    const targetExists =
+      storagePathStateHas(job.pathState, storage, targetPath) ||
+      (!job.pathState && (await storageEntryExists(storage, targetPath)))
+    const caseOnlyRename =
+      sourcePath !== targetPath &&
+      normalizeStoragePath(storage, sourcePath).toLocaleLowerCase() ===
+        normalizeStoragePath(storage, targetPath).toLocaleLowerCase()
+
+    if (targetExists && !caseOnlyRename) {
+      appendAiRenameJobResult(
+        job,
+        {
+          action: operation.type,
+          message: '目标名称已存在，未执行覆盖',
+          newPath: targetPath,
+          oldPath: sourcePath,
+          status: 'skipped',
+        },
+        'skipped',
+      )
+      return ''
+    }
+
+    let finalPath
+
+    if (caseOnlyRename) {
+      const temporaryName = `.openstrmbridge-ai-${createSecret(8)}`
+      const temporaryPath = await renameStorageEntry(storage, sourcePath, temporaryName)
+
+      try {
+        finalPath = await renameStorageEntry(storage, temporaryPath, operation.newName)
+      } catch (error) {
+        await renameStorageEntry(
+          storage,
+          temporaryPath,
+          getStoragePathName(storage, sourcePath),
+        ).catch(() => undefined)
+        throw error
+      }
+    } else {
+      finalPath = await renameStorageEntry(storage, sourcePath, operation.newName)
+    }
+
+    operation.currentPath = finalPath
+    moveStoragePathState(job.pathState, storage, sourcePath, finalPath)
+    appendAiRenameJobResult(
+      job,
+      {
+        action: operation.type,
+        message: '重命名成功',
+        newPath: finalPath,
+        oldPath: sourcePath,
+        status: 'succeeded',
+      },
+      'succeeded',
+    )
+    return finalPath
+  } catch (error) {
+    appendAiRenameJobResult(
+      job,
+      {
+        action: operation.type,
+        message: getErrorMessage(error),
+        newPath: targetPath,
+        oldPath: sourcePath,
+        status: 'failed',
+      },
+      'failed',
+    )
+    return ''
+  }
+}
+
+async function executeAiMovePlan(job, storage, plan) {
+  throwIfAiRenameCancelled(job)
+
+  if (!plan.topEntry || !plan.seriesTitle) {
+    const rootEpisodeOperations = plan.operations.filter(
+      (operation) => operation.kind === 'file' && operation.currentPath,
+    )
+
+    for (const operation of rootEpisodeOperations) {
+      const item = plan.itemById.get(operation.entryId)
+      const seasonName = formatSeasonDirectory(item?.season ?? plan.classification.series.season)
+
+      if (!seasonName) {
+        continue
+      }
+
+      const seriesDirectory = joinStoragePath(storage, plan.operationRoot, plan.seriesTitle)
+      const seasonDirectory = joinStoragePath(storage, seriesDirectory, seasonName)
+      const sourcePath = operation.currentPath
+      const targetPath = joinStoragePath(
+        storage,
+        seasonDirectory,
+        getStoragePathName(storage, sourcePath),
+      )
+      job.progress.totalOperations += 1
+
+      try {
+        assertStoragePathInside(storage, targetPath, plan.operationRoot)
+        await ensureStorageDirectory(storage, seasonDirectory, plan.operationRoot, job.pathState)
+
+        if (
+          storagePathStateHas(job.pathState, storage, targetPath) ||
+          (!job.pathState && (await storageEntryExists(storage, targetPath)))
+        ) {
+          appendAiRenameJobResult(
+            job,
+            {
+              action: 'move',
+              message: '目标季目录中已存在同名文件',
+              newPath: targetPath,
+              oldPath: sourcePath,
+              status: 'skipped',
+            },
+            'skipped',
+          )
+          continue
+        }
+
+        const movedPath = await moveStorageEntry(storage, sourcePath, seasonDirectory)
+        moveStoragePathState(job.pathState, storage, sourcePath, movedPath)
+        appendAiRenameJobResult(
+          job,
+          {
+            action: 'move',
+            message: '文件已移动到标准季目录',
+            newPath: movedPath,
+            oldPath: sourcePath,
+            status: 'succeeded',
+          },
+          'succeeded',
+        )
+      } catch (error) {
+        appendAiRenameJobResult(
+          job,
+          {
+            action: 'move',
+            message: getErrorMessage(error),
+            newPath: targetPath,
+            oldPath: sourcePath,
+            status: 'failed',
+          },
+          'failed',
+        )
+      }
+    }
+
+    return
+  }
+
+  const topSourcePath = plan.topEntry.path
+
+  if (plan.topRole === 'season-folder') {
+    job.progress.totalOperations += 1
+    const seasonName = formatSeasonDirectory(plan.topSeason)
+    const seriesDirectory = joinStoragePath(storage, plan.operationRoot, plan.seriesTitle)
+    const finalSeasonPath = seasonName ? joinStoragePath(storage, seriesDirectory, seasonName) : ''
+
+    if (!seasonName) {
+      appendAiRenameJobResult(
+        job,
+        {
+          action: 'move',
+          message: '未识别出季号，无法创建标准季目录',
+          oldPath: topSourcePath,
+          status: 'skipped',
+        },
+        'skipped',
+      )
+      return
+    }
+
+    try {
+      assertStoragePathInside(storage, finalSeasonPath, plan.operationRoot)
+
+      if (
+        storagePathStateHas(job.pathState, storage, finalSeasonPath) ||
+        (!job.pathState && (await storageEntryExists(storage, finalSeasonPath)))
+      ) {
+        appendAiRenameJobResult(
+          job,
+          {
+            action: 'move',
+            message: '同一剧集的目标季目录已存在，已跳过重复季',
+            newPath: finalSeasonPath,
+            oldPath: topSourcePath,
+            status: 'skipped',
+          },
+          'skipped',
+        )
+        return
+      }
+
+      await ensureStorageDirectory(storage, seriesDirectory, plan.operationRoot, job.pathState)
+      const movedPath = await moveStorageEntry(storage, topSourcePath, seriesDirectory)
+      moveStoragePathState(job.pathState, storage, topSourcePath, movedPath)
+      const finalPath = await renameStorageEntry(storage, movedPath, seasonName)
+      moveStoragePathState(job.pathState, storage, movedPath, finalPath)
+      appendAiRenameJobResult(
+        job,
+        {
+          action: 'move',
+          message: '整季目录已归入标准剧集目录',
+          newPath: finalPath,
+          oldPath: topSourcePath,
+          status: 'succeeded',
+        },
+        'succeeded',
+      )
+    } catch (error) {
+      appendAiRenameJobResult(
+        job,
+        {
+          action: 'move',
+          message: getErrorMessage(error),
+          newPath: finalSeasonPath,
+          oldPath: topSourcePath,
+          status: 'failed',
+        },
+        'failed',
+      )
+    }
+
+    return
+  }
+
+  if (plan.topRole === 'series-folder') {
+    const topOperation = plan.operations.find((operation) => operation.isTopFolder)
+
+    if (topOperation) {
+      job.progress.totalOperations += 1
+      await executeAiRenameOperation(job, storage, plan.operationRoot, topOperation)
+    }
+  }
+}
+
+async function executeAiRenamePlan(job, storage, plan, allowMove, groupIndex, groupCount) {
+  throwIfAiRenameCancelled(job)
+  markDuplicateRenameTargets(storage, [plan])
+
+  const operations = plan.operations.filter(
+    (operation) => !(allowMove === true && operation.isTopFolder),
+  )
+  job.progress.totalOperations += operations.length
+  setAiRenameJobStage(job, 'executing', `正在逐项修改第 ${groupIndex}/${groupCount} 个目录`)
+
+  for (const operation of operations
+    .filter((item) => item.kind === 'file')
+    .sort((first, second) => second.depth - first.depth)) {
+    await executeAiRenameOperation(job, storage, plan.operationRoot, operation)
+  }
+
+  for (const operation of operations
+    .filter((item) => item.kind === 'folder')
+    .sort((first, second) => second.depth - first.depth)) {
+    await executeAiRenameOperation(job, storage, plan.operationRoot, operation)
+  }
+
+  if (allowMove === true) {
+    setAiRenameJobStage(job, 'moving', `正在整理第 ${groupIndex}/${groupCount} 个目录的标准季结构`)
+    await executeAiMovePlan(job, storage, plan)
+  }
+}
+
+async function runAiRenameJob(job, payload) {
+  job.status = 'running'
+  job.startedAt = new Date().toISOString()
+
+  try {
+    const storages = await readStorages()
+    const storage = storages.find((item) => item.id === payload.storageId)
+
+    if (!storage) {
+      throw new Error('未找到存储记录')
+    }
+
+    const settings = await readSettings()
+    const aiSettings = normalizeAiRenameSettings({
+      ...settings.aiRename,
+      tmdbEnabled: payload.useTmdb === true && settings.aiRename?.tmdbEnabled === true,
+    })
+    const extensionSets = getRenameExtensionSets(settings.strm)
+    setAiRenameJobStage(job, 'scanning', '正在递归扫描目录')
+    const { entries, operationRoot, pathState } = await scanAiRenameTree(
+      storage,
+      payload.path,
+      job,
+      extensionSets,
+    )
+    job.pathState = pathState
+    throwIfAiRenameCancelled(job)
+
+    const rootNames = entries.filter((entry) => entry.depth === 1).map((entry) => entry.name)
+    const groupedEntries = new Map()
+
+    for (const entry of entries) {
+      const group = groupedEntries.get(entry.topId) ?? []
+      group.push(entry)
+      groupedEntries.set(entry.topId, group)
+    }
+
+    const groups = [...groupedEntries.values()].filter((group) =>
+      group.some((entry) => entry.kind === 'file' && isMediaFileName(entry.name, extensionSets)),
+    )
+    const groupRecords = groups.map((groupEntries) => ({
+      groupEntries,
+      groupId: String(groupEntries[0]?.topId ?? ''),
+      groupPath: getTopEntryForPlan(groupEntries)?.path ?? groupEntries[0]?.path ?? operationRoot,
+    }))
+    job.progress.totalGroups = groupRecords.length
+
+    let suggestionsByGroup = new Map()
+
+    if (groupRecords.length > 0) {
+      const inventoryEntryCount = groupRecords.reduce(
+        (total, record) => total + record.groupEntries.length,
+        0,
+      )
+      job.currentPath = operationRoot
+      setAiRenameJobStage(
+        job,
+        'analyzing',
+        `正在一次性提交 ${groupRecords.length} 个视频目录给 AI 识别`,
+      )
+      appendAiRenameJobResult(job, {
+        action: 'inventory',
+        message: `已汇总 ${groupRecords.length} 个视频目录、${inventoryEntryCount} 个条目，正在进行一次性 AI 识别`,
+        oldPath: operationRoot,
+        status: 'info',
+      })
+      suggestionsByGroup = await classifyAiRenameInventory(
+        aiSettings,
+        groupRecords,
+        rootNames,
+        job,
+        String(payload.extraPrompt ?? '').trim(),
+      )
+      throwIfAiRenameCancelled(job)
+      appendAiRenameJobResult(job, {
+        action: 'inventory',
+        message: `AI 已一次性返回 ${suggestionsByGroup.size}/${groupRecords.length} 个目录的修改建议，开始按顺序执行`,
+        oldPath: operationRoot,
+        status: 'info',
+      })
+    } else {
+      appendAiRenameJobResult(job, {
+        action: 'inventory',
+        message: '未扫描到可处理的视频目录，未调用 AI',
+        oldPath: operationRoot,
+        status: 'info',
+      })
+    }
+
+    for (const [groupOffset, groupRecord] of groupRecords.entries()) {
+      throwIfAiRenameCancelled(job)
+      const groupIndex = groupOffset + 1
+      const { groupEntries, groupId, groupPath } = groupRecord
+      job.currentPath = groupPath
+      setAiRenameJobStage(
+        job,
+        'executing',
+        `AI 建议已返回，正在准备修改第 ${groupIndex}/${groupRecords.length} 个目录`,
+      )
+      appendAiRenameJobResult(job, {
+        action: 'directory',
+        message: `开始执行 AI 建议（${groupIndex}/${groupRecords.length}）`,
+        oldPath: groupPath,
+        status: 'info',
+      })
+
+      try {
+        const suggestion = suggestionsByGroup.get(groupId)
+
+        if (!suggestion) {
+          throw new Error(`AI 未返回目录 ${groupId} 的修改建议`)
+        }
+
+        if (suggestion.error) {
+          throw new Error(suggestion.error)
+        }
+
+        const classification = normalizeAiClassification(suggestion.payload)
+        classification.series.namingStyle = aiSettings.namingStyle
+        const tmdbResult = await verifySeriesWithTmdb(classification.series, aiSettings, job)
+        classification.series = tmdbResult.series
+        job.progress.analyzed += groupEntries.length
+
+        if (tmdbResult.warning) {
+          appendAiRenameJobResult(job, {
+            action: 'tmdb',
+            message: tmdbResult.warning,
+            oldPath: groupEntries[0]?.path,
+            status: 'warning',
+          })
+        }
+
+        const plan = buildAiRenameGroupPlan(
+          groupEntries,
+          classification,
+          extensionSets,
+          operationRoot,
+        )
+
+        if (plan.seriesTitle) {
+          await executeAiRenamePlan(
+            job,
+            storage,
+            plan,
+            payload.allowMove === true,
+            groupIndex,
+            groupRecords.length,
+          )
+          job.progress.processedGroups = groupIndex
+          appendAiRenameJobResult(job, {
+            action: 'directory',
+            message: `目录处理完成（${groupIndex}/${groupRecords.length}），继续执行下一目录`,
+            oldPath: groupPath,
+            status: 'info',
+          })
+        } else {
+          job.progress.totalOperations += 1
+          appendAiRenameJobResult(
+            job,
+            {
+              action: 'analyze',
+              message: 'AI 未生成有效的中英双语剧名',
+              oldPath: groupEntries[0]?.path,
+              status: 'failed',
+            },
+            'failed',
+          )
+        }
+      } catch (error) {
+        if (job.cancelRequested || /AI_RENAME_CANCELLED|任务已取消/.test(error?.message ?? '')) {
+          throw new Error('AI_RENAME_CANCELLED')
+        }
+
+        job.progress.totalOperations += 1
+        appendAiRenameJobResult(
+          job,
+          {
+            action: 'analyze',
+            message: getErrorMessage(error),
+            oldPath: groupEntries[0]?.path,
+            status: 'failed',
+          },
+          'failed',
+        )
+      } finally {
+        job.progress.processedGroups = groupIndex
+      }
+    }
+
+    throwIfAiRenameCancelled(job)
+
+    job.status =
+      job.progress.failed > 0 || job.progress.skipped > 0
+        ? job.progress.succeeded > 0
+          ? 'partial'
+          : 'failed'
+        : 'completed'
+    setAiRenameJobStage(
+      job,
+      'finished',
+      `处理完成：成功 ${job.progress.succeeded}，跳过 ${job.progress.skipped}，失败 ${job.progress.failed}`,
+    )
+  } catch (error) {
+    if (job.cancelRequested || error?.message === 'AI_RENAME_CANCELLED') {
+      job.status = 'cancelled'
+      setAiRenameJobStage(job, 'cancelled', '任务已取消，已完成的操作不会回滚')
+    } else {
+      job.status = 'failed'
+      setAiRenameJobStage(job, 'failed', getErrorMessage(error))
+      appendAiRenameJobResult(job, {
+        action: 'job',
+        message: getErrorMessage(error),
+        status: 'failed',
+      })
+    }
+  } finally {
+    job.currentPath = ''
+    job.finishedAt = new Date().toISOString()
+    activeAiRenameJobsByStorage.delete(job.storageId)
+
+    if (job.taskId) {
+      await saveAiRenameTaskRunState(job.taskId, {
+        currentJobId: '',
+        lastJob: getAiRenameJobForClient(job),
+        lastRunAt: job.finishedAt,
+        status: job.status,
+      }).catch(() => undefined)
+    }
+  }
+}
+
+function scheduleAiRenameJob(job, payload) {
+  setImmediate(() => {
+    void runAiRenameJob(job, payload)
+  })
+}
+
+async function createAiRenameJob(payload, options = {}) {
+  const storageId = String(payload.storageId ?? '').trim()
+  const requestedPath = String(payload.path ?? '').trim()
+
+  if (!storageId || !requestedPath) {
+    throw new Error('缺少存储或目录路径')
+  }
+
+  const existingJobId = activeAiRenameJobsByStorage.get(storageId)
+
+  if (existingJobId) {
+    const existingJob = aiRenameJobs.get(existingJobId)
+
+    if (existingJob && ['queued', 'running'].includes(existingJob.status)) {
+      const error = new Error('该存储已有 AI 重命名任务正在运行')
+      error.statusCode = 409
+      throw error
+    }
+  }
+
+  const settings = await readSettings()
+  const aiSettings = normalizeAiRenameSettings(settings.aiRename)
+
+  if (!aiSettings.apiKey || !aiSettings.model || !aiSettings.baseUrl) {
+    throw new Error('请先在系统设置中完成 AI 重命名接口配置')
+  }
+
+  if (payload.useTmdb === true && (!aiSettings.tmdbEnabled || !aiSettings.tmdbToken)) {
+    throw new Error('TMDB 校验未启用或未配置 Read Access Token')
+  }
+
+  const allowMove =
+    typeof payload.allowMove === 'boolean' ? payload.allowMove : aiSettings.rebuildFolders
+
+  const job = {
+    abortController: new AbortController(),
+    allowMove,
+    cancelRequested: false,
+    createdAt: new Date().toISOString(),
+    currentPath: '',
+    finishedAt: undefined,
+    id: `rename-${Date.now()}-${createSecret(6)}`,
+    message: '任务已创建',
+    path: requestedPath,
+    progress: {
+      analyzed: 0,
+      completedOperations: 0,
+      failed: 0,
+      ignored: 0,
+      scanned: 0,
+      skipped: 0,
+      succeeded: 0,
+      totalOperations: 0,
+      processedGroups: 0,
+      totalGroups: 0,
+    },
+    results: [],
+    stage: 'queued',
+    startedAt: undefined,
+    status: 'queued',
+    storageId,
+    taskId: String(payload.taskId ?? '').trim() || undefined,
+    useTmdb: payload.useTmdb === true,
+  }
+
+  aiRenameJobs.set(job.id, job)
+  activeAiRenameJobsByStorage.set(storageId, job.id)
+  if (!options.deferStart) {
+    scheduleAiRenameJob(job, {
+      ...payload,
+      allowMove,
+      path: requestedPath,
+      storageId,
+    })
+  }
+
+  return getAiRenameJobForClient(job)
+}
+
+function cancelAiRenameJob(jobId) {
+  const job = aiRenameJobs.get(jobId)
+
+  if (!job) {
+    throw new Error('未找到 AI 重命名任务')
+  }
+
+  if (['completed', 'partial', 'failed', 'cancelled'].includes(job.status)) {
+    return getAiRenameJobForClient(job)
+  }
+
+  job.cancelRequested = true
+  job.abortController.abort()
+  job.message = '正在停止任务'
+  return getAiRenameJobForClient(job)
+}
+
+function normalizeAiRenameTask(values = {}, existing = {}) {
+  const now = new Date().toISOString()
+  const id = String(values.id || existing.id || '').trim()
+  const name = String(values.name || existing.name || '').trim()
+  const storageId = String(values.storageId || existing.storageId || '').trim()
+  const taskPath = String(values.path || existing.path || '').trim()
+
+  if (!id || !name || !storageId || !taskPath) {
+    throw new Error('AI 重命名任务缺少名称、存储或路径')
+  }
+
+  return {
+    ...existing,
+    allowMove: values.allowMove === true,
+    createdAt: existing.createdAt || now,
+    extraPrompt: String(values.extraPrompt ?? '').trim(),
+    id,
+    name,
+    path: taskPath,
+    status: existing.status || 'idle',
+    storageId,
+    updatedAt: now,
+    useTmdb: values.useTmdb === true,
+  }
+}
+
+async function readAiRenameTasksForClient() {
+  const tasks = await readAiRenameTasks()
+
+  return tasks.map((task) => {
+    const activeJob = task.currentJobId ? aiRenameJobs.get(task.currentJobId) : undefined
+
+    if (activeJob) {
+      return {
+        ...task,
+        lastJob: getAiRenameJobForClient(activeJob),
+        status: activeJob.status,
+      }
+    }
+
+    if (task.currentJobId) {
+      const lastStatus = task.lastJob?.status
+      const status = ['completed', 'partial', 'failed', 'cancelled'].includes(lastStatus)
+        ? lastStatus
+        : 'failed'
+      return { ...task, currentJobId: '', status }
+    }
+
+    return task
+  })
+}
+
+async function saveAiRenameTask(taskId, values) {
+  const tasks = await readAiRenameTasks()
+  const existing = tasks.find((task) => task.id === taskId)
+
+  if (existing?.currentJobId) {
+    const activeJob = aiRenameJobs.get(existing.currentJobId)
+
+    if (activeJob && !['completed', 'partial', 'failed', 'cancelled'].includes(activeJob.status)) {
+      throw new Error('任务正在运行，无法编辑')
+    }
+
+    if (!activeJob) {
+      existing.currentJobId = ''
+      existing.status = ['completed', 'partial', 'failed', 'cancelled'].includes(
+        existing.lastJob?.status,
+      )
+        ? existing.lastJob.status
+        : 'failed'
+    }
+  }
+
+  const task = normalizeAiRenameTask({ ...values, id: taskId }, existing)
+  const nextTasks = existing
+    ? tasks.map((item) => (item.id === taskId ? task : item))
+    : [...tasks, task]
+  await writeAiRenameTasks(nextTasks)
+  return task
+}
+
+async function saveAiRenameTaskRunState(taskId, patch) {
+  const tasks = await readAiRenameTasks()
+  const task = tasks.find((item) => item.id === taskId)
+
+  if (!task) {
+    throw new Error('未找到 AI 重命名任务')
+  }
+
+  const nextTask = { ...task, ...patch, updatedAt: new Date().toISOString() }
+  await writeAiRenameTasks(tasks.map((item) => (item.id === taskId ? nextTask : item)))
+  return nextTask
+}
+
+async function deleteAiRenameTask(taskId) {
+  const tasks = await readAiRenameTasks()
+  const task = tasks.find((item) => item.id === taskId)
+
+  if (!task) {
+    return false
+  }
+
+  const activeJob = task.currentJobId ? aiRenameJobs.get(task.currentJobId) : undefined
+
+  if (activeJob && !['completed', 'partial', 'failed', 'cancelled'].includes(activeJob.status)) {
+    throw new Error('任务正在运行，无法删除')
+  }
+
+  await writeAiRenameTasks(tasks.filter((item) => item.id !== taskId))
+  return true
+}
+
+async function runAiRenameTask(taskId) {
+  const tasks = await readAiRenameTasks()
+  const task = tasks.find((item) => item.id === taskId)
+
+  if (!task) {
+    throw new Error('未找到 AI 重命名任务')
+  }
+
+  if (task.currentJobId) {
+    const currentJob = aiRenameJobs.get(task.currentJobId)
+
+    if (
+      currentJob &&
+      !['completed', 'partial', 'failed', 'cancelled'].includes(currentJob.status)
+    ) {
+      const error = new Error('该任务已经在运行')
+      error.statusCode = 409
+      throw error
+    }
+  }
+
+  const payload = {
+    allowMove: task.allowMove,
+    extraPrompt: task.extraPrompt,
+    path: task.path,
+    recursive: true,
+    storageId: task.storageId,
+    taskId: task.id,
+    useTmdb: task.useTmdb,
+  }
+  const job = await createAiRenameJob(payload, { deferStart: true })
+  let nextTask
+
+  try {
+    nextTask = await saveAiRenameTaskRunState(taskId, {
+      currentJobId: job.id,
+      lastJob: job,
+      lastRunAt: new Date().toISOString(),
+      status: 'running',
+    })
+  } catch (error) {
+    aiRenameJobs.delete(job.id)
+    activeAiRenameJobsByStorage.delete(job.storageId)
+    throw error
+  }
+
+  const queuedJob = aiRenameJobs.get(job.id)
+  scheduleAiRenameJob(queuedJob, { ...payload, allowMove: job.allowMove })
+
+  return { job, task: nextTask }
+}
+
+async function stopAiRenameTask(taskId) {
+  const tasks = await readAiRenameTasks()
+  const task = tasks.find((item) => item.id === taskId)
+
+  if (!task?.currentJobId) {
+    throw new Error('任务当前未运行')
+  }
+
+  const job = cancelAiRenameJob(task.currentJobId)
+  const nextTask = await saveAiRenameTaskRunState(taskId, {
+    lastJob: job,
+    status: 'running',
+  })
+  return { job, task: nextTask }
+}
+
+async function getAiRenameTaskResult(taskId) {
+  const tasks = await readAiRenameTasks()
+  const task = tasks.find((item) => item.id === taskId)
+
+  if (!task) {
+    throw new Error('未找到 AI 重命名任务')
+  }
+
+  const activeJob = task.currentJobId ? aiRenameJobs.get(task.currentJobId) : undefined
+  return activeJob ? getAiRenameJobForClient(activeJob) : task.lastJob || null
+}
+
+function getAiRenameTaskRoute(requestUrl) {
+  const pathname = new URL(requestUrl || '/', 'http://localhost').pathname
+  const match = pathname.match(/^\/api\/ai-rename\/tasks\/([^/]+)(?:\/(run|stop|result))?$/)
+
+  if (!match) {
+    return undefined
+  }
+
+  return {
+    action: match[2] ?? '',
+    taskId: decodeURIComponent(match[1]),
+  }
+}
+
+async function runAllAiRenameTasks() {
+  const tasks = await readAiRenameTasks()
+  const results = []
+
+  for (const task of tasks) {
+    try {
+      results.push(await runAiRenameTask(task.id))
+    } catch (error) {
+      results.push({ error: getErrorMessage(error), task })
+    }
+  }
+
+  return { results, tasks: await readAiRenameTasksForClient() }
 }
 
 async function pathExists(filePath) {
@@ -2726,7 +5060,9 @@ function normalizeStrmAssistantPluginSettingValue(definition, value) {
       return value !== 0
     }
 
-    const normalized = String(value ?? '').trim().toLowerCase()
+    const normalized = String(value ?? '')
+      .trim()
+      .toLowerCase()
 
     if (['1', 'true', 'yes', 'on', 'enabled'].includes(normalized)) {
       return true
@@ -2886,10 +5222,7 @@ function resolveStrmAssistantPluginConfigurationFile(pluginInfo, detection = {})
   const pluginDirectoryRoot = path.dirname(pluginDirectory)
 
   if (normalizedConfigurationName.startsWith('/config/plugins/')) {
-    return path.join(
-      pluginDirectory,
-      normalizedConfigurationName.slice('/config/plugins/'.length),
-    )
+    return path.join(pluginDirectory, normalizedConfigurationName.slice('/config/plugins/'.length))
   }
 
   if (normalizedConfigurationName === '/config/plugins') {
@@ -3900,6 +6233,160 @@ async function generateStrmForEntry({
   }
 }
 
+function getResolvedLocalPathKey(filePath) {
+  const resolved = path.resolve(String(filePath ?? ''))
+  return process.platform === 'win32' ? resolved.toLocaleLowerCase() : resolved
+}
+
+async function pruneEmptyStrmDirectories(directoryPaths, outputDirectory, logLines) {
+  const resolvedOutputDirectory = path.resolve(outputDirectory)
+  const directoriesByKey = new Map()
+
+  for (const directoryPath of directoryPaths) {
+    let currentDirectory = path.resolve(directoryPath)
+
+    while (
+      currentDirectory !== resolvedOutputDirectory &&
+      isLocalPathInside(currentDirectory, resolvedOutputDirectory)
+    ) {
+      directoriesByKey.set(getResolvedLocalPathKey(currentDirectory), currentDirectory)
+      const parentDirectory = path.dirname(currentDirectory)
+
+      if (parentDirectory === currentDirectory) {
+        break
+      }
+
+      currentDirectory = parentDirectory
+    }
+  }
+
+  const directories = [...directoriesByKey.values()].sort(
+    (first, second) => second.length - first.length,
+  )
+  let removed = 0
+
+  for (const directoryPath of directories) {
+    try {
+      await rmdir(directoryPath)
+      removed += 1
+      logLines.push(`清理空目录: ${path.relative(resolvedOutputDirectory, directoryPath)}`)
+    } catch (error) {
+      if (!['ENOENT', 'ENOTEMPTY', 'EEXIST'].includes(error?.code)) {
+        logLines.push(
+          `清理空目录失败: ${path.relative(resolvedOutputDirectory, directoryPath)} - ${getErrorMessage(error)}`,
+        )
+      }
+    }
+  }
+
+  return removed
+}
+
+async function cleanupStaleStrmFiles({
+  currentIndexEntries,
+  logLines,
+  outputDirectory,
+  previousIndexEntries,
+  task,
+}) {
+  const resolvedOutputDirectory = path.resolve(outputDirectory)
+  const currentFiles = new Set(
+    currentIndexEntries.map((entry) => getResolvedLocalPathKey(entry.strmFile)),
+  )
+  const previousEntriesByFile = new Map()
+  const otherTaskFiles = new Set()
+
+  for (const entry of previousIndexEntries) {
+    if (!entry?.strmFile) {
+      continue
+    }
+
+    const fileKey = getResolvedLocalPathKey(entry.strmFile)
+
+    if (String(entry?.taskId ?? '') === String(task.id)) {
+      previousEntriesByFile.set(fileKey, entry)
+    } else {
+      otherTaskFiles.add(fileKey)
+    }
+  }
+
+  const staleEntries = [...previousEntriesByFile.entries()].filter(
+    ([fileKey]) => !currentFiles.has(fileKey),
+  )
+  const retainedEntries = []
+  const affectedDirectories = new Set()
+  let deleted = 0
+  let failed = 0
+  let missing = 0
+  let shared = 0
+
+  if (staleEntries.length === 0) {
+    logLines.push('旧 STRM 清理完成：没有发现失效文件。')
+    return { deleted, failed, missing, removedDirectories: 0, retainedEntries, shared, stale: 0 }
+  }
+
+  logLines.push(`发现 ${staleEntries.length} 个失效 STRM，开始安全清理。`)
+
+  for (const [fileKey, entry] of staleEntries) {
+    const staleFile = path.resolve(String(entry.strmFile))
+    const relativeFile = path.relative(resolvedOutputDirectory, staleFile)
+    const isSafeTaskFile =
+      staleFile !== resolvedOutputDirectory &&
+      isLocalPathInside(staleFile, resolvedOutputDirectory) &&
+      path.extname(staleFile).toLocaleLowerCase() === '.strm'
+
+    if (otherTaskFiles.has(fileKey)) {
+      shared += 1
+      logLines.push(`保留其他任务仍在引用的 STRM: ${relativeFile}`)
+      continue
+    }
+
+    if (!isSafeTaskFile) {
+      failed += 1
+      retainedEntries.push(entry)
+      logLines.push(`拒绝清理越界或非 STRM 索引项: ${staleFile}`)
+      continue
+    }
+
+    try {
+      await unlink(staleFile)
+      deleted += 1
+      affectedDirectories.add(path.dirname(staleFile))
+      logLines.push(`已删除失效 STRM: ${relativeFile}`)
+    } catch (error) {
+      if (error?.code === 'ENOENT') {
+        missing += 1
+        affectedDirectories.add(path.dirname(staleFile))
+        logLines.push(`失效 STRM 已不存在，仅移除索引: ${relativeFile}`)
+        continue
+      }
+
+      failed += 1
+      retainedEntries.push(entry)
+      logLines.push(`删除失效 STRM 失败: ${relativeFile} - ${getErrorMessage(error)}`)
+    }
+  }
+
+  const removedDirectories = await pruneEmptyStrmDirectories(
+    affectedDirectories,
+    resolvedOutputDirectory,
+    logLines,
+  )
+  logLines.push(
+    `旧 STRM 清理完成：删除 ${deleted} 个，已不存在 ${missing} 个，其他任务引用 ${shared} 个，失败 ${failed} 个，清理空目录 ${removedDirectories} 个。`,
+  )
+
+  return {
+    deleted,
+    failed,
+    missing,
+    removedDirectories,
+    retainedEntries,
+    shared,
+    stale: staleEntries.length,
+  }
+}
+
 async function scanAndGenerateStrmEntries({
   logLines,
   outputDirectory,
@@ -3937,10 +6424,7 @@ async function scanAndGenerateStrmEntries({
   }
 
   function shouldStopScanning() {
-    return (
-      claimedDirectories >= scanLimits.directories ||
-      mediaFiles >= scanLimits.mediaFiles
-    )
+    return claimedDirectories >= scanLimits.directories || mediaFiles >= scanLimits.mediaFiles
   }
 
   async function takeDirectory() {
@@ -4002,7 +6486,7 @@ async function scanAndGenerateStrmEntries({
       }
 
       try {
-        const result = await listStorageEntries(storage, currentPath)
+        const result = await listAllStorageEntries(storage, currentPath)
         const mediaEntries = []
         scannedDirectories += 1
         logLines.push(`读取目录: ${result.path}`)
@@ -4037,10 +6521,13 @@ async function scanAndGenerateStrmEntries({
   await Promise.all(
     Array.from({ length: scanThreadCount }, () => {
       return scanWorker()
-    })
+    }),
   )
 
-  if (claimedDirectories >= scanLimits.directories || mediaFiles >= scanLimits.mediaFiles) {
+  const scanLimitReached =
+    claimedDirectories >= scanLimits.directories || mediaFiles >= scanLimits.mediaFiles
+
+  if (scanLimitReached) {
     logLines.push('达到扫描上限，已停止继续递归。')
   }
 
@@ -4049,6 +6536,7 @@ async function scanAndGenerateStrmEntries({
     failed,
     generated,
     mediaFiles,
+    scanLimitReached,
     scannedDirectories,
     skipped,
     strmIndexEntries,
@@ -4061,13 +6549,20 @@ function getTaskRunCompletionStatus(result = {}) {
   const generated = Math.max(0, Number(result.generated ?? 0) || 0)
   const skipped = Math.max(0, Number(result.skipped ?? 0) || 0)
   const mediaFiles = Math.max(0, Number(result.mediaFiles ?? 0) || 0)
+  const scanLimitReached = result.scanLimitReached === true
   const completedMediaFiles = generated + skipped
 
-  if (failed === 0 && failedDirectories === 0) {
+  if (failed === 0 && failedDirectories === 0 && !scanLimitReached) {
     return 'succeeded'
   }
 
-  if (generated === 0 && skipped > 0 && failedDirectories === 0) {
+  if (
+    failed === 0 &&
+    generated === 0 &&
+    skipped > 0 &&
+    failedDirectories === 0 &&
+    !scanLimitReached
+  ) {
     return 'succeeded'
   }
 
@@ -4114,11 +6609,22 @@ async function executeTask(task, storage, strmSettings, settings = {}) {
     }
   }
 
+  let previousIndexEntries = []
+  let previousIndexAvailable = true
+
+  try {
+    previousIndexEntries = await readStrmIndex()
+  } catch (error) {
+    previousIndexAvailable = false
+    logLines.push(`读取旧 STRM 索引失败，将跳过失效文件清理: ${getErrorMessage(error)}`)
+  }
+
   let {
     failedDirectories,
     failed,
     generated,
     mediaFiles,
+    scanLimitReached,
     scannedDirectories,
     skipped,
     strmIndexEntries,
@@ -4131,12 +6637,74 @@ async function executeTask(task, storage, strmSettings, settings = {}) {
     task,
   })
 
-  try {
-    await upsertStrmIndexEntries(strmIndexEntries)
-    logLines.push(`已更新 STRM 索引: ${strmIndexEntries.length} 条`)
-  } catch (error) {
-    failed += 1
-    logLines.push(`更新 STRM 索引失败: ${getErrorMessage(error)}`)
+  let cleanupDeleted = 0
+  let cleanupFailed = 0
+  let cleanupMissing = 0
+  let cleanupRemovedDirectories = 0
+  let cleanupShared = 0
+  let cleanupSkipped = false
+
+  if (
+    previousIndexAvailable &&
+    failed === 0 &&
+    failedDirectories === 0 &&
+    scanLimitReached !== true
+  ) {
+    try {
+      previousIndexEntries = await readStrmIndex()
+    } catch (error) {
+      previousIndexAvailable = false
+      logLines.push(`重新读取旧 STRM 索引失败，将跳过失效文件清理: ${getErrorMessage(error)}`)
+    }
+  }
+
+  const cleanupAllowed =
+    previousIndexAvailable && failed === 0 && failedDirectories === 0 && scanLimitReached !== true
+
+  if (cleanupAllowed) {
+    const cleanupResult = await cleanupStaleStrmFiles({
+      currentIndexEntries: strmIndexEntries,
+      logLines,
+      outputDirectory,
+      previousIndexEntries,
+      task,
+    })
+    cleanupDeleted = cleanupResult.deleted
+    cleanupFailed = cleanupResult.failed
+    cleanupMissing = cleanupResult.missing
+    cleanupRemovedDirectories = cleanupResult.removedDirectories
+    cleanupShared = cleanupResult.shared
+    failed += cleanupFailed
+
+    try {
+      await replaceStrmIndexEntriesForTask(task.id, [
+        ...strmIndexEntries,
+        ...cleanupResult.retainedEntries,
+      ])
+      logLines.push(
+        `已同步 STRM 索引: 当前 ${strmIndexEntries.length} 条，保留清理失败 ${cleanupResult.retainedEntries.length} 条`,
+      )
+    } catch (error) {
+      failed += 1
+      logLines.push(`同步 STRM 索引失败: ${getErrorMessage(error)}`)
+    }
+  } else {
+    cleanupSkipped = true
+    const reasons = [
+      !previousIndexAvailable ? '旧索引不可用' : '',
+      failedDirectories > 0 ? `${failedDirectories} 个目录读取失败` : '',
+      failed > 0 ? `${failed} 个文件生成失败` : '',
+      scanLimitReached ? '达到扫描上限' : '',
+    ].filter(Boolean)
+    logLines.push(`跳过旧 STRM 清理：${reasons.join('、') || '本次扫描不完整'}。`)
+
+    try {
+      await upsertStrmIndexEntries(strmIndexEntries)
+      logLines.push(`已增量更新 STRM 索引: ${strmIndexEntries.length} 条`)
+    } catch (error) {
+      failed += 1
+      logLines.push(`更新 STRM 索引失败: ${getErrorMessage(error)}`)
+    }
   }
 
   const finishedAt = new Date()
@@ -4145,13 +6713,14 @@ async function executeTask(task, storage, strmSettings, settings = {}) {
     failedDirectories,
     generated,
     mediaFiles,
+    scanLimitReached,
     skipped,
   })
   const ok = status === 'succeeded'
   const partial = status === 'partial'
 
   logLines.push(
-    `生成完成，共发现 ${mediaFiles} 个媒体文件，生成 ${generated} 个，跳过 ${skipped} 个，失败 ${failed} 个，目录读取失败 ${failedDirectories} 个。`,
+    `生成完成，共发现 ${mediaFiles} 个媒体文件，生成 ${generated} 个，跳过 ${skipped} 个，失败 ${failed} 个，目录读取失败 ${failedDirectories} 个，清理失效 STRM ${cleanupDeleted} 个。`,
   )
   logLines.push(`${formatLocalDateTime(finishedAt)} 任务完成`)
   logLines.finish(status)
@@ -4159,6 +6728,12 @@ async function executeTask(task, storage, strmSettings, settings = {}) {
   return {
     log: logLines.text(),
     result: {
+      cleanupDeleted,
+      cleanupFailed,
+      cleanupMissing,
+      cleanupRemovedDirectories,
+      cleanupShared,
+      cleanupSkipped,
       failed,
       failedDirectories,
       finishedAt: finishedAt.toISOString(),
@@ -4167,6 +6742,7 @@ async function executeTask(task, storage, strmSettings, settings = {}) {
       ok,
       outputPath,
       partial,
+      scanLimitReached,
       scannedDirectories,
       skipped,
       startedAt: startedAt.toISOString(),
@@ -6191,6 +8767,7 @@ const server = createServer(async (request, response) => {
   if (request.method === 'GET' && request.url === '/api/settings') {
     try {
       const settings = await readSettings(getRequestOrigin(request))
+      settings.aiRename = getAiRenameSettingsForClient(settings.aiRename)
       settings.proxy302 = {
         ...settings.proxy302,
         ...getGe2oRuntimeStatus(settings.proxy302),
@@ -6200,6 +8777,62 @@ const server = createServer(async (request, response) => {
       sendJson(response, 500, {
         ok: false,
         title: '读取设置失败',
+        message: getErrorMessage(error),
+      })
+    }
+    return
+  }
+
+  if (request.method === 'PUT' && request.url === '/api/settings/ai-rename') {
+    try {
+      const values = await readJsonBody(request)
+      sendJson(response, 200, await saveAiRenameSettings(values, getRequestOrigin(request)))
+    } catch (error) {
+      sendJson(response, 400, {
+        ok: false,
+        title: '保存 AI 重命名设置失败',
+        message: getErrorMessage(error),
+      })
+    }
+    return
+  }
+
+  if (request.method === 'POST' && request.url === '/api/ai-rename/test') {
+    try {
+      const values = await readJsonBody(request)
+      sendJson(response, 200, await testAiRenameConnection(values, getRequestOrigin(request)))
+    } catch (error) {
+      sendJson(response, error?.statusCode ?? 400, {
+        ok: false,
+        title: 'AI 重命名接口测试失败',
+        message: getErrorMessage(error),
+      })
+    }
+    return
+  }
+
+  if (request.method === 'POST' && request.url === '/api/ai-rename/models') {
+    try {
+      const values = await readJsonBody(request)
+      sendJson(response, 200, await discoverAiRenameModels(values, getRequestOrigin(request)))
+    } catch (error) {
+      sendJson(response, error?.statusCode ?? 400, {
+        ok: false,
+        title: 'AI 模型探测失败',
+        message: getErrorMessage(error),
+      })
+    }
+    return
+  }
+
+  if (request.method === 'POST' && request.url === '/api/ai-rename/tmdb/test') {
+    try {
+      const values = await readJsonBody(request)
+      sendJson(response, 200, await testTmdbConnection(values, getRequestOrigin(request)))
+    } catch (error) {
+      sendJson(response, error?.statusCode ?? 400, {
+        ok: false,
+        title: 'TMDB 连接测试失败',
         message: getErrorMessage(error),
       })
     }
@@ -6629,6 +9262,147 @@ const server = createServer(async (request, response) => {
       sendJson(response, 400, {
         ok: false,
         title: '目录读取失败',
+        message: getErrorMessage(error),
+      })
+    }
+    return
+  }
+
+  if (request.method === 'POST' && request.url === '/api/storage/ai-rename/jobs') {
+    try {
+      const payload = await readJsonBody(request)
+      sendJson(response, 202, await createAiRenameJob(payload))
+    } catch (error) {
+      sendJson(response, error?.statusCode ?? 400, {
+        ok: false,
+        title: '创建 AI 重命名任务失败',
+        message: getErrorMessage(error),
+      })
+    }
+    return
+  }
+
+  if (request.method === 'GET' && request.url === '/api/ai-rename/tasks') {
+    try {
+      sendJson(response, 200, await readAiRenameTasksForClient())
+    } catch (error) {
+      sendJson(response, 500, {
+        ok: false,
+        title: '读取 AI 重命名任务失败',
+        message: getErrorMessage(error),
+      })
+    }
+    return
+  }
+
+  if (request.method === 'POST' && request.url === '/api/ai-rename/tasks/run-all') {
+    try {
+      sendJson(response, 200, await runAllAiRenameTasks())
+    } catch (error) {
+      sendJson(response, 400, {
+        ok: false,
+        title: '运行全部 AI 重命名任务失败',
+        message: getErrorMessage(error),
+      })
+    }
+    return
+  }
+
+  const aiRenameTaskRoute = getAiRenameTaskRoute(request.url)
+
+  if (request.method === 'PUT' && aiRenameTaskRoute && !aiRenameTaskRoute.action) {
+    try {
+      const values = await readJsonBody(request)
+      sendJson(response, 200, await saveAiRenameTask(aiRenameTaskRoute.taskId, values))
+    } catch (error) {
+      sendJson(response, error?.statusCode ?? 400, {
+        ok: false,
+        title: '保存 AI 重命名任务失败',
+        message: getErrorMessage(error),
+      })
+    }
+    return
+  }
+
+  if (request.method === 'DELETE' && aiRenameTaskRoute && !aiRenameTaskRoute.action) {
+    try {
+      sendJson(response, 200, {
+        deleted: await deleteAiRenameTask(aiRenameTaskRoute.taskId),
+        ok: true,
+      })
+    } catch (error) {
+      sendJson(response, 400, {
+        ok: false,
+        title: '删除 AI 重命名任务失败',
+        message: getErrorMessage(error),
+      })
+    }
+    return
+  }
+
+  if (request.method === 'POST' && aiRenameTaskRoute?.action === 'run') {
+    try {
+      sendJson(response, 202, await runAiRenameTask(aiRenameTaskRoute.taskId))
+    } catch (error) {
+      sendJson(response, error?.statusCode ?? 400, {
+        ok: false,
+        title: '运行 AI 重命名任务失败',
+        message: getErrorMessage(error),
+      })
+    }
+    return
+  }
+
+  if (request.method === 'POST' && aiRenameTaskRoute?.action === 'stop') {
+    try {
+      sendJson(response, 200, await stopAiRenameTask(aiRenameTaskRoute.taskId))
+    } catch (error) {
+      sendJson(response, 400, {
+        ok: false,
+        title: '停止 AI 重命名任务失败',
+        message: getErrorMessage(error),
+      })
+    }
+    return
+  }
+
+  if (request.method === 'GET' && aiRenameTaskRoute?.action === 'result') {
+    try {
+      sendJson(response, 200, await getAiRenameTaskResult(aiRenameTaskRoute.taskId))
+    } catch (error) {
+      sendJson(response, 404, {
+        ok: false,
+        title: '读取 AI 重命名任务结果失败',
+        message: getErrorMessage(error),
+      })
+    }
+    return
+  }
+
+  const aiRenameJobRoute = getAiRenameJobRoute(request.url)
+
+  if (request.method === 'GET' && aiRenameJobRoute && !aiRenameJobRoute.action) {
+    const job = aiRenameJobs.get(aiRenameJobRoute.jobId)
+
+    if (!job) {
+      sendJson(response, 404, {
+        ok: false,
+        title: '未找到 AI 重命名任务',
+        message: '任务可能因服务重启而失效。',
+      })
+    } else {
+      sendJson(response, 200, getAiRenameJobForClient(job))
+    }
+    return
+  }
+
+  if (request.method === 'POST' && aiRenameJobRoute?.action === 'cancel') {
+    try {
+      sendJson(response, 200, cancelAiRenameJob(aiRenameJobRoute.jobId))
+    } catch (error) {
+      sendJson(response, 404, {
+        ok: false,
+        title: '停止 AI 重命名任务失败',
         message: getErrorMessage(error),
       })
     }

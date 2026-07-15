@@ -1001,6 +1001,83 @@ a {
     background var(--motion);
 }
 
+.ai-rename-settings-page {
+  max-width: 980px;
+}
+
+.ai-rename-job-panel {
+  display: grid;
+  gap: 18px;
+}
+
+.ai-rename-live-state {
+  display: grid;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.ai-rename-current-path {
+  display: grid;
+  gap: 7px;
+}
+
+.ai-rename-current-path span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.ai-rename-current-path code {
+  padding: 9px 11px;
+  overflow-wrap: anywhere;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--text);
+}
+
+.ai-rename-log-viewer {
+  min-height: 300px;
+  max-height: 440px;
+}
+
+.ai-rename-job-empty {
+  display: grid;
+  gap: 12px;
+  place-items: center;
+  min-height: 240px;
+  padding: 24px 16px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.ai-rename-progress-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.ai-rename-progress-grid span {
+  display: grid;
+  gap: 3px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--muted);
+  background: var(--surface-soft);
+  text-align: center;
+}
+
+.ai-rename-progress-grid strong {
+  color: var(--text);
+  font-size: 18px;
+}
+
 .plugin-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1413,6 +1490,85 @@ a {
   color: #1f2937;
   font-size: 20px;
   font-weight: 700;
+}
+
+.ai-rename-settings-form {
+  display: grid;
+  gap: 16px;
+}
+
+.ai-rename-settings-section {
+  overflow: hidden;
+  border: 1px solid var(--muted-border);
+  border-radius: 12px;
+  background: #fff;
+}
+
+.ai-rename-settings-section .settings-section-title {
+  margin: 0;
+  border: 0;
+  border-bottom: 1px solid var(--muted-border);
+  border-radius: 0;
+  background: linear-gradient(180deg, #f8fbff 0%, #f3f7fc 100%);
+}
+
+.ai-rename-settings-body {
+  display: grid;
+  gap: 0;
+  padding: 16px 16px 14px;
+}
+
+.ai-rename-settings-body .ant-form-item {
+  margin-bottom: 14px;
+}
+
+.ai-rename-settings-body .ant-form-item:last-child {
+  margin-bottom: 0;
+}
+
+.ai-rename-settings-alert {
+  margin-bottom: 14px;
+}
+
+.ai-rename-model-row {
+  display: flex;
+  gap: 10px;
+  align-items: stretch;
+}
+
+.ai-rename-model-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.ai-rename-model-row .ant-btn {
+  flex-shrink: 0;
+}
+
+.ai-rename-json-input {
+  font-family: Consolas, 'SFMono-Regular', 'Liberation Mono', monospace;
+}
+
+.ai-rename-switch-item .ant-form-item-control-input {
+  min-height: auto;
+}
+
+.ai-rename-test-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ai-rename-section-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 4px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--muted-border);
+}
+
+.ai-rename-settings-form .settings-save-row {
+  margin-top: 2px;
 }
 
 .field-help,
@@ -1906,6 +2062,10 @@ a {
     min-width: 220px;
   }
 
+  .ai-rename-progress-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+
   .plugin-grid,
   .storage-method-grid,
   .strm-assistant-option-grid {
@@ -1939,6 +2099,22 @@ a {
   .settings-section-title {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .ai-rename-model-row {
+    flex-direction: column;
+  }
+
+  .ai-rename-model-row .ant-btn {
+    width: 100%;
+  }
+
+  .ai-rename-section-actions {
+    justify-content: stretch;
+  }
+
+  .ai-rename-section-actions .ant-btn {
+    width: 100%;
   }
 
   .account-settings-grid {

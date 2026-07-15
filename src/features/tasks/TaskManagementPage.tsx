@@ -634,11 +634,11 @@ export function TaskManagementPage() {
 
       if (response.result.status === 'partial' || response.result.partial) {
         message.warning(
-          `${task.name} 部分完成：生成 ${response.result.generated} 个，跳过 ${response.result.skipped} 个，失败 ${response.result.failed} 个，请查看日志`,
+          `${task.name} 部分完成：生成 ${response.result.generated} 个，跳过 ${response.result.skipped} 个，清理旧 STRM ${response.result.cleanupDeleted ?? 0} 个，失败 ${response.result.failed} 个，请查看日志`,
         )
       } else if (response.result.ok) {
         message.success(
-          `${task.name} 已生成 ${response.result.generated} 个 STRM，跳过 ${response.result.skipped} 个`,
+          `${task.name} 已生成 ${response.result.generated} 个 STRM，跳过 ${response.result.skipped} 个，清理旧 STRM ${response.result.cleanupDeleted ?? 0} 个`,
         )
       } else {
         message.warning(`${task.name} 运行完成，但存在失败项，请查看日志`)
@@ -794,8 +794,9 @@ export function TaskManagementPage() {
 
   const outputPath = getTaskOutputPath(watchedName, taskOutputRoot)
   const runningCount = tasks.filter((task) => task.status === 'running').length
-  const failedCount = tasks.filter((task) => task.status === 'failed' || task.status === 'partial')
-    .length
+  const failedCount = tasks.filter(
+    (task) => task.status === 'failed' || task.status === 'partial',
+  ).length
   const totalMediaCount = tasks.reduce(
     (total, task) => total + (task.lastResult?.mediaFiles ?? task.lastResult?.generated ?? 0),
     0,
@@ -961,7 +962,7 @@ export function TaskManagementPage() {
             </Form.Item>
             <div>
               <strong>增量生成模式</strong>
-              <p>运行时仅生成不存在的 STRM 文件，避免覆盖已有结果。</p>
+              <p>已有 STRM 指向未变时直接跳过；完整扫描成功后会自动删除云盘中已失效的旧 STRM。</p>
             </div>
           </div>
 

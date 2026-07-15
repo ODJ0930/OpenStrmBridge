@@ -25,12 +25,19 @@ export interface TaskRunResult {
   ok: boolean
   partial?: boolean
   status?: TaskStatus
+  cleanupDeleted?: number
+  cleanupFailed?: number
+  cleanupMissing?: number
+  cleanupRemovedDirectories?: number
+  cleanupShared?: number
+  cleanupSkipped?: boolean
   scannedDirectories: number
   mediaFiles: number
   generated: number
   skipped: number
   failed: number
   failedDirectories: number
+  scanLimitReached?: boolean
   outputPath: string
   startedAt: string
   finishedAt: string
@@ -108,6 +115,122 @@ export interface FileEntry {
   kind: FileEntryKind
   size: string
   updatedAt: string
+}
+
+export interface AiRenameSettings {
+  apiKeyConfigured: boolean
+  baseUrl: string
+  customParameters: string
+  model: string
+  namingStyle: AiRenameNamingStyle
+  promptTemplate: string
+  rebuildFolders: boolean
+  tmdbBaseUrl: string
+  tmdbEnabled: boolean
+  tmdbLanguage: string
+  tmdbTokenConfigured: boolean
+}
+
+export interface AiRenameSettingsUpdate {
+  apiKey?: string
+  baseUrl: string
+  clearApiKey?: boolean
+  clearTmdbToken?: boolean
+  customParameters: string
+  model: string
+  namingStyle: AiRenameNamingStyle
+  promptTemplate: string
+  rebuildFolders: boolean
+  tmdbBaseUrl: string
+  tmdbEnabled: boolean
+  tmdbLanguage: string
+  tmdbToken?: string
+}
+
+export type AiRenameNamingStyle = 'zh-en' | 'en-zh' | 'zh' | 'en'
+
+export type AiRenameJobStatus =
+  'queued' | 'running' | 'completed' | 'partial' | 'failed' | 'cancelled'
+
+export type AiRenameJobStage =
+  'queued' | 'scanning' | 'analyzing' | 'executing' | 'moving' | 'finished' | 'failed' | 'cancelled'
+
+export interface AiRenameJobProgress {
+  analyzed: number
+  completedOperations: number
+  failed: number
+  ignored: number
+  processedGroups?: number
+  scanned: number
+  skipped: number
+  succeeded: number
+  totalGroups?: number
+  totalOperations: number
+}
+
+export interface AiRenameJobResultItem {
+  action: string
+  at: string
+  message: string
+  newPath?: string
+  oldPath?: string
+  status: 'succeeded' | 'skipped' | 'failed' | 'ignored' | 'warning' | 'info'
+}
+
+export interface AiRenameJob {
+  allowMove: boolean
+  createdAt: string
+  currentPath: string
+  finishedAt?: string
+  id: string
+  message: string
+  path: string
+  progress: AiRenameJobProgress
+  results: AiRenameJobResultItem[]
+  stage: AiRenameJobStage
+  startedAt?: string
+  status: AiRenameJobStatus
+  storageId: string
+  taskId?: string
+  useTmdb: boolean
+}
+
+export type AiRenameManagedTaskStatus =
+  'idle' | 'queued' | 'running' | 'completed' | 'partial' | 'failed' | 'cancelled'
+
+export interface AiRenameManagedTask {
+  allowMove: boolean
+  createdAt: string
+  currentJobId?: string
+  extraPrompt?: string
+  id: string
+  lastJob?: AiRenameJob
+  lastRunAt?: string
+  name: string
+  path: string
+  status: AiRenameManagedTaskStatus
+  storageId: string
+  updatedAt: string
+  useTmdb: boolean
+}
+
+export interface AiRenameManagedTaskInput {
+  allowMove: boolean
+  extraPrompt?: string
+  id: string
+  name: string
+  path: string
+  storageId: string
+  useTmdb: boolean
+}
+
+export interface CreateAiRenameJobInput {
+  allowMove: boolean
+  extraPrompt?: string
+  path: string
+  recursive: true
+  storageId: string
+  useTmdb: boolean
 }
 
 export interface StrmAssistantValues {

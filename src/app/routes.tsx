@@ -2,6 +2,8 @@ import { Navigate, useLocation, useRoutes } from 'react-router-dom'
 import type { RouteObject } from 'react-router-dom'
 
 import { ApiAccessPage } from '../features/api-access/ApiAccessPage'
+import { AiRenamePage } from '../features/ai-rename/AiRenamePage'
+import { AiRenameTaskManagementPage } from '../features/ai-rename/AiRenameTaskManagementPage'
 import { LoginPage } from '../features/auth/LoginPage'
 import { useAuth } from '../features/auth/authContext'
 import { FileBrowserPage } from '../features/file-browser/FileBrowserPage'
@@ -46,6 +48,8 @@ const routeDefinitions: RouteObject[] = [
       { path: routes.tasks.path.slice(1), element: <TaskManagementPage /> },
       { path: routes.storage.path.slice(1), element: <StorageManagementPage /> },
       { path: routes.browser.path.slice(1), element: <FileBrowserPage /> },
+      { path: routes.aiRename.path.slice(1), element: <AiRenamePage /> },
+      { path: routes.aiRenameTasks.path.slice(1), element: <AiRenameTaskManagementPage /> },
       { path: routes.plugins.path.slice(1), element: <PluginManagementPage /> },
       { path: routes.apiAccess.path.slice(1), element: <ApiAccessPage /> },
       { path: routes.settings.path.slice(1), element: <SystemSettingsPage /> },

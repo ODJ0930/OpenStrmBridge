@@ -9,6 +9,22 @@ import { PagePanel } from '../../shared/ui/PagePanel'
 import { StatCard } from '../../shared/ui/StatCard'
 import { fileBrowserService } from './fileBrowserService'
 
+function getDefaultPath(storage: StorageItem | undefined) {
+  if (!storage) {
+    return '/'
+  }
+
+  if (storage.accessMethod === 'local') {
+    return storage.local?.path || storage.rootPath || storage.endpoint || '/'
+  }
+
+  if (storage.accessMethod === 'openlist') {
+    return storage.openlist?.basePath || storage.rootPath || '/'
+  }
+
+  return storage.rootPath || '/'
+}
+
 export function FileBrowserPage() {
   const { message } = AntApp.useApp()
   const [storages, setStorages] = useState<StorageItem[]>([])
@@ -39,22 +55,6 @@ export function FileBrowserPage() {
     () => storages.find((storage) => storage.id === storageId),
     [storageId, storages],
   )
-
-  function getDefaultPath(storage: StorageItem | undefined) {
-    if (!storage) {
-      return '/'
-    }
-
-    if (storage.accessMethod === 'local') {
-      return storage.local?.path || storage.rootPath || storage.endpoint || '/'
-    }
-
-    if (storage.accessMethod === 'openlist') {
-      return storage.openlist?.basePath || storage.rootPath || '/'
-    }
-
-    return storage.rootPath || '/'
-  }
 
   const loadEntries = useCallback(
     async (nextStorageId: string, nextPath: string) => {

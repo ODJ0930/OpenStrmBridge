@@ -98,6 +98,19 @@ describe('TaskManagementPage', () => {
   beforeEach(() => {
     vi.mocked(storageService.list).mockResolvedValue([storage])
     vi.mocked(settingsService.loadSettings).mockResolvedValue({
+      aiRename: {
+        apiKeyConfigured: false,
+        baseUrl: 'https://api.openai.com/v1',
+        customParameters: '{}',
+        model: '',
+        namingStyle: 'zh-en',
+        promptTemplate: '测试提示词',
+        rebuildFolders: false,
+        tmdbBaseUrl: 'https://api.themoviedb.org/3',
+        tmdbEnabled: false,
+        tmdbLanguage: 'zh-CN',
+        tmdbTokenConfigured: false,
+      },
       emby: {
         apiKey: '',
       },

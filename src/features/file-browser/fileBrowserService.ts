@@ -1,7 +1,16 @@
 import { getApiBaseUrl } from '../../shared/config/runtimeConfig'
-import type { FileEntry, FileEntryKind, StorageItem } from '../../shared/types/domain'
+import type {
+  AiRenameJob,
+  CreateAiRenameJobInput,
+  FileEntry,
+  FileEntryKind,
+  StorageItem,
+} from '../../shared/types/domain'
 
 export interface FileBrowserService {
+  cancelAiRenameJob(jobId: string): Promise<AiRenameJob>
+  createAiRenameJob(input: CreateAiRenameJobInput): Promise<AiRenameJob>
+  getAiRenameJob(jobId: string): Promise<AiRenameJob>
   listStorages(): Promise<StorageItem[]>
   listEntries(storageId: string, path: string): Promise<FileEntryBrowseResult>
 }
@@ -29,6 +38,7 @@ interface BackendBrowseResult {
 const backendBaseUrl = getApiBaseUrl()
 const storageUrl = `${backendBaseUrl}/api/storage`
 const browseUrl = `${backendBaseUrl}/api/storage/browse`
+const aiRenameJobsUrl = `${backendBaseUrl}/api/storage/ai-rename/jobs`
 
 const mockStorages: StorageItem[] = [
   {
@@ -154,6 +164,86 @@ async function readJsonResponse<T>(response: Response) {
 }
 
 export const fileBrowserService: FileBrowserService = {
+  async createAiRenameJob(input) {
+    if (import.meta.env.MODE === 'test') {
+      return {
+        allowMove: input.allowMove,
+        createdAt: new Date().toISOString(),
+        currentPath: '',
+        id: 'test-ai-rename-job',
+        message: '任务已创建',
+        path: input.path,
+        progress: {
+          analyzed: 0,
+          completedOperations: 0,
+          failed: 0,
+          ignored: 0,
+          processedGroups: 0,
+          scanned: 0,
+          skipped: 0,
+          succeeded: 0,
+          totalGroups: 0,
+          totalOperations: 0,
+        },
+        results: [],
+        stage: 'queued',
+        status: 'queued',
+        storageId: input.storageId,
+        useTmdb: input.useTmdb,
+      }
+    }
+
+    const response = await fetch(aiRenameJobsUrl, {
+      body: JSON.stringify(input),
+      headers: { 'Content-Type': 'application/json' },
+      method: 'POST',
+    })
+    return readJsonResponse<AiRenameJob>(response)
+  },
+  async getAiRenameJob(jobId) {
+    if (import.meta.env.MODE === 'test') {
+      return {
+        allowMove: false,
+        createdAt: new Date().toISOString(),
+        currentPath: '',
+        finishedAt: new Date().toISOString(),
+        id: jobId,
+        message: '处理完成：成功 0，跳过 0，失败 0',
+        path: '/',
+        progress: {
+          analyzed: 0,
+          completedOperations: 0,
+          failed: 0,
+          ignored: 0,
+          processedGroups: 0,
+          scanned: 0,
+          skipped: 0,
+          succeeded: 0,
+          totalGroups: 0,
+          totalOperations: 0,
+        },
+        results: [],
+        stage: 'finished',
+        status: 'completed',
+        storageId: 'mock-storage',
+        useTmdb: false,
+      }
+    }
+
+    const response = await fetch(`${aiRenameJobsUrl}/${encodeURIComponent(jobId)}`)
+    return readJsonResponse<AiRenameJob>(response)
+  },
+  async cancelAiRenameJob(jobId) {
+    if (import.meta.env.MODE === 'test') {
+      const job = await this.getAiRenameJob(jobId)
+      return { ...job, message: '任务已取消', stage: 'cancelled', status: 'cancelled' }
+    }
+
+    const response = await fetch(`${aiRenameJobsUrl}/${encodeURIComponent(jobId)}/cancel`, {
+      method: 'POST',
+    })
+    return readJsonResponse<AiRenameJob>(response)
+  },
   async listStorages() {
     if (import.meta.env.MODE === 'test') {
       return mockStorages.map((storage) => ({ ...storage, openlist: { ...storage.openlist! } }))
