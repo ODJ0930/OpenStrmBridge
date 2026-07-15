@@ -102,7 +102,7 @@ function getRequestedTargets() {
 function run(command, args, options = {}) {
   return new Promise((resolve, reject) => {
     const { env, ...spawnOptions } = options
-    const useShell = process.platform === 'win32' && command === 'pnpm'
+    const useShell = process.platform === 'win32' && ['npm', 'pnpm'].includes(command)
     const executable = useShell ? command : command
     const child = spawn(executable, args, {
       ...(useShell ? { shell: true } : {}),
@@ -245,6 +245,16 @@ async function buildFrontend() {
   await run('pnpm', ['build'])
 }
 
+async function buildGe2oWeb() {
+  const sourceDir = path.join(rootDir, 'vendor', 'go-emby2openlist', 'web', 'src')
+  const outputDir = path.join(rootDir, 'vendor', 'go-emby2openlist', 'web', 'dist')
+
+  await run('npm', ['ci'], { cwd: sourceDir })
+  await run('npm', ['run', 'build'], { cwd: sourceDir })
+  await rm(outputDir, { force: true, recursive: true })
+  await cp(path.join(sourceDir, 'build', 'client'), outputDir, { recursive: true })
+}
+
 async function buildGe2o(target, outputFile) {
   await mkdir(path.dirname(outputFile), { recursive: true })
   await run('go', ['build', '-trimpath', '-ldflags=-s -w', '-o', outputFile, '.'], {
@@ -382,6 +392,7 @@ async function copyManagerScript() {
 const requestedTargets = getRequestedTargets()
 
 await buildFrontend()
+await buildGe2oWeb()
 await mkdir(releaseRoot, { recursive: true })
 
 for (const targetName of requestedTargets) {
