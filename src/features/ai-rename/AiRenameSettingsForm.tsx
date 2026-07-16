@@ -391,7 +391,7 @@ export function AiRenameSettingsForm() {
             <Input.TextArea
               aria-label="AI 提示词"
               maxLength={8000}
-              placeholder="请输入电视剧媒体库名称分析规则"
+              placeholder="请输入电影与电视剧媒体库名称分析规则"
               rows={8}
               showCount
             />
@@ -403,7 +403,7 @@ export function AiRenameSettingsForm() {
         <SettingsSectionTitle icon="folder" title="文件夹整理" />
         <div className="ai-rename-settings-body">
           <Form.Item
-            extra="同时应用于剧集目录、单季目录、视频文件及匹配的字幕和 NFO。"
+            extra="同时应用于电影、剧集目录、单季目录、视频文件及匹配的字幕和 NFO。"
             label="命名规则"
             name="namingStyle"
           >
@@ -435,9 +435,10 @@ export function AiRenameSettingsForm() {
                 <div>剧集目录：剧集显示名 (首播年份)</div>
                 <div>季目录：Season 01（特别篇为 Season 00）</div>
                 <div>视频文件：剧集显示名 - S01E01.ext</div>
+                <div>电影文件：电影显示名 (年份).ext</div>
               </div>
             }
-            message="Emby 电视剧输出格式"
+            message="Emby 媒体输出格式"
             showIcon
             type="info"
           />

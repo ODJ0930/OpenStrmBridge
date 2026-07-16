@@ -223,7 +223,7 @@ describe('STRM stale-file cleanup integration', () => {
     expect(run.task.lastLog).toContain('跳过旧 STRM 清理：达到扫描上限')
   }, 20_000)
 
-  it('refuses to delete stale index paths outside the task output directory', async () => {
+  it('detaches stale index paths outside the output without deleting external files', async () => {
     await unlink(path.join(seasonDirectory, 'Second S01E02.mkv'))
     const externalStrmFile = path.join(tempDirectory, 'must-not-delete.strm')
     await writeFile(externalStrmFile, 'external')
@@ -239,10 +239,15 @@ describe('STRM stale-file cleanup integration', () => {
 
     const run = await runTask()
 
-    expect(run.result).toMatchObject({ cleanupFailed: 1, cleanupSkipped: false, status: 'partial' })
+    expect(run.result).toMatchObject({
+      cleanupDetached: 1,
+      cleanupFailed: 0,
+      cleanupSkipped: false,
+      status: 'succeeded',
+    })
     expect(await exists(externalStrmFile)).toBe(true)
-    expect(run.task.lastLog).toContain('拒绝清理越界或非 STRM 索引项')
+    expect(run.task.lastLog).toContain('已移除历史或越界 STRM 索引（未删除磁盘文件）')
     const reloadedIndex = JSON.parse(await readFile(indexFile, 'utf8'))
-    expect(reloadedIndex.some((entry) => entry.strmFile === externalStrmFile)).toBe(true)
+    expect(reloadedIndex.some((entry) => entry.strmFile === externalStrmFile)).toBe(false)
   }, 20_000)
 })

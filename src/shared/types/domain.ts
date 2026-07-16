@@ -27,6 +27,7 @@ export interface TaskRunResult {
   partial?: boolean
   status?: TaskStatus
   cleanupDeleted?: number
+  cleanupDetached?: number
   cleanupFailed?: number
   cleanupMissing?: number
   cleanupRemovedDirectories?: number

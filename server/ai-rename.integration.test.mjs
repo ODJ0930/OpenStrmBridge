@@ -107,6 +107,7 @@ describe('AI rename local-storage integration', () => {
   let tempDirectory
   let libraryDirectory
   let managedLibraryDirectory
+  let movieLibraryDirectory
   let moveLibraryDirectory
   let preStrmLibraryDirectory
   let strmOutputDirectory
@@ -126,6 +127,11 @@ describe('AI rename local-storage integration', () => {
     await mkdir(sourceDirectory, { recursive: true })
     await writeFile(path.join(sourceDirectory, 'S06E01.Solaricks.1080p.HD中英双字.mp4'), 'media')
     await writeFile(path.join(sourceDirectory, '更多电视剧下载请访问官网.png'), 'advert')
+    movieLibraryDirectory = path.join(tempDirectory, 'movie-library')
+    const movieCollectionDirectory = path.join(movieLibraryDirectory, 'Fast & Furious Collection')
+    await mkdir(movieCollectionDirectory, { recursive: true })
+    await writeFile(path.join(movieCollectionDirectory, 'Fast & Furious - S01E01.mp4'), 'movie-1')
+    await writeFile(path.join(movieCollectionDirectory, 'Fast & Furious - S01E02.mp4'), 'movie-2')
     moveLibraryDirectory = path.join(tempDirectory, 'move-library')
     const seasonOneDirectory = path.join(moveLibraryDirectory, 'Rick.and.Morty.S01.1080p')
     const seasonTwoDirectory = path.join(moveLibraryDirectory, 'Rick.and.Morty.S02.1080p')
@@ -191,6 +197,45 @@ describe('AI rename local-storage integration', () => {
       inventoryRequestGroupCounts.push(inventory.length)
       const groups = inventory.map((group) => {
         const entries = group.entries
+
+        if (/Fast\s*&\s*Furious/i.test(group.directoryName)) {
+          const movies = [
+            {
+              titleOriginal: 'The Fast and the Furious',
+              titleZh: '速度与激情',
+              year: 2001,
+            },
+            {
+              titleOriginal: '2 Fast 2 Furious',
+              titleZh: '速度与激情2',
+              year: 2003,
+            },
+          ]
+          const items = entries.map((entry) => {
+            if (entry.kind === 'folder') {
+              return { id: entry.id, role: 'collection-folder' }
+            }
+
+            if (/\.(?:mp4|mkv)$/i.test(entry.name)) {
+              const episode = Number.parseInt(entry.name.match(/E(\d{1,2})/i)?.[1] ?? '', 10)
+              return {
+                id: entry.id,
+                role: 'movie',
+                ...(movies[episode - 1] ?? movies[0]),
+              }
+            }
+
+            return { id: entry.id, role: 'ignore' }
+          })
+
+          return {
+            groupId: group.groupId,
+            items,
+            mediaType: 'movie-collection',
+            series: null,
+          }
+        }
+
         const seasonMatch = JSON.stringify(entries).match(/S(\d{1,2})E/i)
         const season = seasonMatch ? Number.parseInt(seasonMatch[1], 10) : 6
         const items = entries.map((entry) => {
@@ -384,6 +429,15 @@ describe('AI rename local-storage integration', () => {
           local: { path: moveLibraryDirectory },
           name: '本地移动测试',
           rootPath: moveLibraryDirectory,
+          status: 'connected',
+        },
+        {
+          accessMethod: 'local',
+          endpoint: movieLibraryDirectory,
+          id: 'local-movie-test',
+          local: { path: movieLibraryDirectory },
+          name: '本地电影合集测试',
+          rootPath: movieLibraryDirectory,
           status: 'connected',
         },
         {
@@ -614,6 +668,53 @@ describe('AI rename local-storage integration', () => {
     ).toBe('advert')
   }, 20_000)
 
+  it('renames a numbered movie collection as individual movies instead of TV episodes', async () => {
+    const headers = {
+      'Content-Type': 'application/json',
+      Origin: backendBaseUrl,
+      Referer: `${backendBaseUrl}/ai-rename-tasks`,
+    }
+    const createResponse = await fetch(`${backendBaseUrl}/api/storage/ai-rename/jobs`, {
+      body: JSON.stringify({
+        allowMove: true,
+        path: movieLibraryDirectory,
+        recursive: true,
+        storageId: 'local-movie-test',
+        useTmdb: false,
+      }),
+      headers,
+      method: 'POST',
+    })
+    expect(createResponse.status).toBe(202)
+    let job = await createResponse.json()
+
+    for (
+      let attempt = 0;
+      attempt < 100 && !['completed', 'partial', 'failed'].includes(job.status);
+      attempt += 1
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      job = await (
+        await fetch(`${backendBaseUrl}/api/storage/ai-rename/jobs/${encodeURIComponent(job.id)}`, {
+          headers,
+        })
+      ).json()
+    }
+
+    expect(job.status, JSON.stringify(job, null, 2)).toBe('completed')
+    expect(job.progress).toMatchObject({ failed: 0, skipped: 0, succeeded: 2 })
+    const collectionDirectory = path.join(movieLibraryDirectory, 'Fast & Furious Collection')
+    const names = await readdir(collectionDirectory)
+    expect(names).toEqual(
+      expect.arrayContaining([
+        '速度与激情 (The Fast and the Furious) (2001).mp4',
+        '速度与激情2 (2 Fast 2 Furious) (2003).mp4',
+      ]),
+    )
+    expect(names).not.toContain('Season 01')
+    expect(names.some((name) => /S01E\d+/i.test(name))).toBe(false)
+  }, 20_000)
+
   it('creates and merges standard season directories when moving is enabled', async () => {
     const aiRequestCountBefore = aiRequestPayloads.length
     const inventoryRequestCountBefore = inventoryRequestGroupCounts.length
@@ -661,7 +762,7 @@ describe('AI rename local-storage integration', () => {
     expect(inventoryRequestGroupCounts.slice(inventoryRequestCountBefore)).toEqual([2])
     const taskAiRequests = aiRequestPayloads.slice(aiRequestCountBefore)
     expect(taskAiRequests).toHaveLength(1)
-    expect(String(taskAiRequests[0].messages?.at(-1)?.content)).toContain('Emby 标准结构')
+    expect(String(taskAiRequests[0].messages?.at(-1)?.content)).toContain('Emby 标准名称')
     expect(job.progress).toMatchObject({ processedGroups: 2, totalGroups: 2 })
     expect(job.results).toEqual(
       expect.arrayContaining([

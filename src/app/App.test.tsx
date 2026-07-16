@@ -185,7 +185,7 @@ describe('OpenStrmBridge shell', () => {
     expect(screen.getByLabelText('AI 提示词')).toBeInTheDocument()
     expect(screen.getByLabelText('命名规则')).toBeInTheDocument()
     expect(screen.getByRole('switch', { name: '重建 Emby 标准文件夹结构' })).not.toBeChecked()
-    expect(screen.getByText('Emby 电视剧输出格式')).toBeInTheDocument()
+    expect(screen.getByText('Emby 媒体输出格式')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'AI 设置' })).not.toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: /选择目标目录/ })).not.toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: /任务进度与结果/ })).not.toBeInTheDocument()
@@ -197,7 +197,7 @@ describe('OpenStrmBridge shell', () => {
     renderRoute('/ai-rename')
 
     const prompt = await screen.findByLabelText('AI 提示词')
-    expect((prompt as HTMLTextAreaElement).value).toContain('电视剧媒体库命名分析器')
+    expect((prompt as HTMLTextAreaElement).value).toContain('电影与电视剧媒体库命名分析器')
 
     await user.type(screen.getByLabelText('API Key'), 'secret-key')
     await user.type(screen.getByRole('combobox', { name: '模型' }), 'test-model')

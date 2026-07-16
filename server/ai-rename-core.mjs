@@ -98,6 +98,10 @@ export function isValidRenameBasename(value) {
 }
 
 export function normalizeSeriesMetadata(series = {}) {
+  if (!series || typeof series !== 'object' || Array.isArray(series)) {
+    series = {}
+  }
+
   const titleZh = sanitizeNameSegment(series.titleZh || series.titleCn || series.chineseTitle)
   const titleOriginal = sanitizeNameSegment(
     series.titleOriginal || series.originalTitle || series.titleEn || series.englishTitle,
@@ -189,6 +193,27 @@ export function renderEpisodeFileName(series, item, originalName) {
   }
 
   return `${title} - ${episodeToken}${extension}`
+}
+
+export function renderMovieFileName(movie, originalName, namingStyle) {
+  const extension = path.posix.extname(String(originalName ?? '').replaceAll('\\', '/'))
+  const title = formatSeriesTitle(
+    {
+      ...movie,
+      namingStyle: movie?.namingStyle ?? namingStyle,
+    },
+    true,
+  )
+
+  if (!title || !extension) {
+    return ''
+  }
+
+  const version = sanitizeNameSegment(movie?.version || movie?.edition)
+  const part = sanitizeNameSegment(movie?.part)
+  const suffix = [version, part].filter(Boolean).join('-')
+
+  return `${title}${suffix ? ` - ${suffix}` : ''}${extension}`
 }
 
 export function renderFolderName(series, item, isTopLevel) {
@@ -290,12 +315,6 @@ export function normalizeAiClassification(payload) {
     throw new Error('AI 返回结构无效')
   }
 
-  const series = normalizeSeriesMetadata(payload.series)
-
-  if (!series.titleZh && !series.titleOriginal) {
-    throw new Error('AI 未识别出剧名')
-  }
-
   const items = Array.isArray(payload.items)
     ? payload.items
         .filter((item) => item && typeof item === 'object' && !Array.isArray(item))
@@ -309,8 +328,39 @@ export function normalizeAiClassification(payload) {
         .filter((item) => item.id)
     : []
 
+  const rawMediaType = String(payload.mediaType ?? payload.type ?? '')
+    .trim()
+    .toLowerCase()
+  const movieItems = items.filter((item) => item.role === 'movie')
+  const mediaType =
+    rawMediaType === 'movie-collection' || rawMediaType === 'movie_collection'
+      ? 'movie-collection'
+      : rawMediaType === 'movie' || rawMediaType === 'film'
+        ? 'movie'
+        : movieItems.length > 0
+          ? movieItems.length > 1
+            ? 'movie-collection'
+            : 'movie'
+          : 'tv'
+  const series = normalizeSeriesMetadata(payload.series)
+
+  if (mediaType === 'tv' && !series.titleZh && !series.titleOriginal) {
+    throw new Error('AI 未识别出剧名')
+  }
+
+  if (
+    mediaType !== 'tv' &&
+    !movieItems.some((item) => {
+      const movie = normalizeSeriesMetadata(item)
+      return movie.titleZh || movie.titleOriginal
+    })
+  ) {
+    throw new Error('AI 未识别出电影名')
+  }
+
   return {
     items,
+    mediaType,
     series,
   }
 }

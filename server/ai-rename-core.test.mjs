@@ -8,6 +8,7 @@ import {
   parseAiJsonContent,
   renderEpisodeFileName,
   renderFolderName,
+  renderMovieFileName,
   renderSidecarFileName,
   sanitizeNameSegment,
 } from './ai-rename-core.mjs'
@@ -32,6 +33,36 @@ describe('AI rename deterministic naming', () => {
         'S06E01.Solaricks.1080p.mp4',
       ),
     ).toBe('瑞克和莫蒂 (Rick and Morty) - S06E01.mp4')
+  })
+
+  it('renders movie names without turning numbered sequels into TV episodes', () => {
+    expect(
+      renderMovieFileName(
+        {
+          titleOriginal: '2 Fast 2 Furious',
+          titleZh: '速度与激情2',
+          year: 2003,
+        },
+        'Fast.and.Furious.S01E02.2160p.mp4',
+        'en-zh',
+      ),
+    ).toBe('2 Fast 2 Furious (速度与激情2) (2003).mp4')
+
+    expect(
+      normalizeAiClassification({
+        items: [
+          {
+            id: 'movie-1',
+            role: 'movie',
+            titleOriginal: 'The Fast and the Furious',
+            titleZh: '速度与激情',
+            year: 2001,
+          },
+        ],
+        mediaType: 'movie-collection',
+        series: null,
+      }),
+    ).toMatchObject({ mediaType: 'movie-collection', series: { titleZh: '' } })
   })
 
   it('supports Chinese-first, English-first and single-language naming rules', () => {
@@ -82,5 +113,9 @@ describe('AI rename deterministic naming', () => {
   it('parses fenced JSON and rejects classifications without a title', () => {
     expect(parseAiJsonContent('```json\n{"ok":true}\n```')).toEqual({ ok: true })
     expect(() => normalizeAiClassification({ items: [], series: {} })).toThrow('AI 未识别出剧名')
+    expect(() => normalizeAiClassification({ items: [], series: null })).toThrow('AI 未识别出剧名')
+    expect(() =>
+      normalizeAiClassification({ items: [], mediaType: 'movie-collection', series: null }),
+    ).toThrow('AI 未识别出电影名')
   })
 })

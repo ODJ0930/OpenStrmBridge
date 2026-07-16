@@ -31,6 +31,7 @@ import {
   parseAiJsonContent,
   renderEpisodeFileName,
   renderFolderName,
+  renderMovieFileName,
   renderSidecarFileName,
 } from './ai-rename-core.mjs'
 
@@ -42,12 +43,24 @@ const legacyAiRenamePromptTemplate = [
   '广告图片、网站宣传文件、发布组与画质编码信息应忽略；无法可靠识别的条目不要猜测。',
   '字幕、NFO、海报等附属文件只在能可靠关联视频时标记。',
 ].join('\n')
-const defaultAiRenamePromptTemplate = [
+const televisionOnlyAiRenamePromptTemplate = [
   '你是电视剧媒体库命名分析器。请仅依据现有目录名和文件名识别剧集信息。',
   '识别正式简体中文名、官方或通用英文名、首播年份、季号、集号、多集编号、版本号和分段标记。',
   'titleOriginal 必须填英文名，不要填韩文、日文或其他原始语种标题；无法确认英文名时才使用可靠的罗马字转写。',
   '输出元数据将由后端固定整理为 Emby 电视剧结构：“剧集显示名 (首播年份)/Season 01/剧集显示名 - S01E01.ext”。',
   '特别篇使用 Season 00 和 S00E01；多集文件使用 S01E01-E02；集号和季号必须用数字字段返回。',
+  '目录季号与文件季号冲突时，以多数视频文件中可验证的季集信息为准。',
+  '广告图片、网站宣传文件、发布组与画质编码信息应忽略；无法可靠识别的条目不要猜测。',
+  '字幕、NFO、海报等附属文件只在能可靠关联视频时标记。',
+].join('\n')
+const defaultAiRenamePromptTemplate = [
+  '你是电影与电视剧媒体库命名分析器。请仅依据现有目录名和文件名识别媒体信息。',
+  '先判断每个顶层目录是电视剧、单部电影还是电影合集，再识别正式简体中文名、官方或通用英文名、年份、季集号、版本号和分段标记。',
+  'titleOriginal 必须填英文名，不要填韩文、日文或其他原始语种标题；无法确认英文名时才使用可靠的罗马字转写。',
+  '电视剧由后端整理为 Emby 结构：“剧集显示名 (首播年份)/Season 01/剧集显示名 - S01E01.ext”。',
+  '电影由后端整理为 Emby 结构：“电影显示名 (年份)/电影显示名 (年份).ext”；同一目录含多部续集时，每个视频必须分别返回自己的片名和年份。',
+  '特别篇使用 Season 00 和 S00E01；多集文件使用 S01E01-E02；集号和季号必须用数字字段返回。',
+  '不要把“速度与激情1-9”这类电影合集当成一季九集；仅在文件明确属于电视剧并有 SxxEyy、第x集等证据时才使用 episode。',
   '目录季号与文件季号冲突时，以多数视频文件中可验证的季集信息为准。',
   '广告图片、网站宣传文件、发布组与画质编码信息应忽略；无法可靠识别的条目不要猜测。',
   '字幕、NFO、海报等附属文件只在能可靠关联视频时标记。',
@@ -706,7 +719,10 @@ function normalizeAiRenameSettings(aiRenameSettings = {}) {
     model: String(aiRenameSettings.model ?? '').trim(),
     namingStyle: normalizeNamingStyle(aiRenameSettings.namingStyle),
     promptTemplate:
-      !configuredPrompt || configuredPrompt === legacyAiRenamePromptTemplate
+      !configuredPrompt ||
+      [legacyAiRenamePromptTemplate, televisionOnlyAiRenamePromptTemplate].includes(
+        configuredPrompt,
+      )
         ? defaultAiRenamePromptTemplate
         : configuredPrompt,
     rebuildFolders: aiRenameSettings.rebuildFolders === true,
@@ -3095,21 +3111,29 @@ function createAiRenameInventoryPrompt(
       relativePath: entry.relativePath,
     })),
     groupId,
+    mediaHint: inferAiRenameMediaHint(
+      getTopEntryForPlan(groupEntries)?.path ?? groupEntries[0]?.path,
+    ),
   }))
 
   return [
     String(promptTemplate || defaultAiRenamePromptTemplate).trim(),
-    '你是电视剧媒体库命名分析器。下方是一次性汇总的全部视频目录清单，需要在一次回复中完成所有目录的识别。只输出一个 JSON 对象，不要输出 Markdown。',
+    '你是电影与电视剧媒体库命名分析器。下方是一次性汇总的全部视频目录清单，需要在一次回复中完成所有目录的识别。只输出一个 JSON 对象，不要输出 Markdown。',
     '不要返回路径或 newName；后端会根据结构化字段生成安全名称。',
-    '输出结构：{"groups":[{"groupId":"输入的 groupId","series":{"titleZh":"简体中文正式名","titleOriginal":"官方或通用英文名","year":2013,"season":1},"items":[...]}]}。',
-    'titleOriginal 是英文显示名字段，即使剧集原始语种是韩文、日文或其他语言，也必须返回官方或通用英文名，不得返回非英文原名。',
-    '后端会固定生成 Emby 标准结构：“剧集显示名 (首播年份)/Season 01/剧集显示名 - S01E01.ext”；特别篇使用 Season 00/S00E01，多集使用 S01E01-E02。',
+    '每组必须返回 mediaType，值只能是 tv、movie、movie-collection。电视剧使用 series；电影的 series 必须为 null，片名和年份写在每个 movie item 中。',
+    '输出结构：{"groups":[{"groupId":"输入的 groupId","mediaType":"tv","series":{"titleZh":"简体中文正式名","titleOriginal":"官方或通用英文名","year":2013,"season":1},"items":[...]}]}。',
+    'titleOriginal 是英文显示名字段，即使原始语种是韩文、日文或其他语言，也必须返回官方或通用英文名，不得返回非英文原名。',
+    '后端会固定生成 Emby 标准名称。电视剧：“剧集显示名 (首播年份)/Season 01/剧集显示名 - S01E01.ext”；电影：“电影显示名 (年份)/电影显示名 (年份).ext”。',
     '每个输入 groupId 必须在 groups 中恰好返回一次；不得合并、拆分或遗漏目录。',
-    'items 中每项必须使用输入 id。role 只能是 series-folder、season-folder、episode、sidecar、poster、fanart、tvshow-nfo、season-nfo、season-poster、ignore。',
+    'items 中每项必须使用输入 id。role 只能是 series-folder、season-folder、episode、collection-folder、movie-folder、movie、sidecar、poster、fanart、tvshow-nfo、season-nfo、season-poster、ignore。',
     'episode 项包含 season、episodes（数字数组），可选 version（如 v2）和 part。',
-    'sidecar 项必须用 sidecarFor 指向对应 episode id；字幕可提供 language、forced、hearingImpaired。',
+    'movie 项必须包含 titleZh、titleOriginal、year，可选 version（如 v2）、edition 和 part；movie-folder 使用 movieFor 指向对应 movie id。',
+    'sidecar 项必须用 sidecarFor 指向对应 episode 或 movie id；字幕可提供 language、forced、hearingImpaired。',
     '每个 eligible 文件或文件夹都应返回一项；广告图片、网站宣传图、无法可靠识别项使用 ignore。',
     '顶层单季目录标为 season-folder；包含多个季目录的剧集容器标为 series-folder；子季目录标为 season-folder。',
+    '单部电影目录标为 movie-folder；同一目录包含多部独立电影或续集时使用 movie-collection，容器标为 collection-folder，每个视频分别标为 movie。',
+    '输入中的 mediaHint 来自用户选择的媒体库路径：movie 表示电影库，禁止返回 tv；tv 表示电视剧库。unknown 才允许完全自行判断。',
+    '数字续集、年份、分辨率或文件排列序号本身不是电视剧集号。尤其是速度与激情、哈利波特等电影系列不得输出 S01E01；即使文件曾被错误命名为 S01E01，也要结合合集目录名按电影续集识别。',
     '必须结合文件内容纠正目录里的错误季号，例如目录写 S01、文件写 S06 时以文件为准。',
     `当前根目录的顶层名称：${JSON.stringify(rootNames)}`,
     additionalInstructions ? `用户补充说明：${additionalInstructions.slice(0, 2000)}` : '',
@@ -3117,6 +3141,37 @@ function createAiRenameInventoryPrompt(
   ]
     .filter(Boolean)
     .join('\n')
+}
+
+function inferAiRenameMediaHint(storagePath) {
+  const segments = String(storagePath ?? '')
+    .replaceAll('\\', '/')
+    .split('/')
+    .map((segment) => segment.trim().toLowerCase())
+    .filter(Boolean)
+
+  if (
+    segments.some(
+      (segment) =>
+        segment.includes('电影') ||
+        /^(?:movie|movies|film|films|cinema)(?:[-_\s].*)?$/.test(segment),
+    )
+  ) {
+    return 'movie'
+  }
+
+  if (
+    segments.some(
+      (segment) =>
+        segment.includes('电视剧') ||
+        segment.includes('剧集') ||
+        /^(?:tv|television|series|shows?)(?:[-_\s].*)?$/.test(segment),
+    )
+  ) {
+    return 'tv'
+  }
+
+  return 'unknown'
 }
 
 function createAiRenameGroupRecords(entries, extensionSets) {
@@ -3183,7 +3238,7 @@ async function classifyAiRenameInventory(aiSettings, groupRecords, rootNames, jo
     [
       {
         content:
-          'You classify TV-series folders and files into structured metadata for a deterministic media-library renamer. Return JSON only.',
+          'You classify movie and TV-series folders and files into structured metadata for a deterministic media-library renamer. Return JSON only.',
         role: 'system',
       },
       {
@@ -3361,23 +3416,30 @@ function buildAiRenameGroupPlan(groupEntries, classification, extensionSets, ope
   const operations = []
   const topEntry = getTopEntryForPlan(groupEntries)
   const topItem = topEntry ? itemById.get(topEntry.id) : undefined
+  const isTelevision = classification.mediaType === 'tv'
+  const movieItems = classifiedItems.filter((item) => item.role === 'movie')
 
   for (const item of classifiedItems) {
     const entry = entryById.get(item.id)
 
     if (
       entry?.kind !== 'file' ||
-      item.role !== 'episode' ||
+      (isTelevision ? item.role !== 'episode' : item.role !== 'movie') ||
       !isMediaFileName(entry.name, extensionSets)
     ) {
       continue
     }
 
-    const resolvedItem = {
-      ...item,
-      season: item.season ?? classification.series.season,
-    }
-    const newName = renderEpisodeFileName(classification.series, resolvedItem, entry.name)
+    const newName = isTelevision
+      ? renderEpisodeFileName(
+          classification.series,
+          {
+            ...item,
+            season: item.season ?? classification.series.season,
+          },
+          entry.name,
+        )
+      : renderMovieFileName(item, entry.name, classification.namingStyle)
 
     if (newName && isValidRenameBasename(newName)) {
       mediaNamesById.set(item.id, newName)
@@ -3396,7 +3458,13 @@ function buildAiRenameGroupPlan(groupEntries, classification, extensionSets, ope
   for (const item of classifiedItems) {
     const entry = entryById.get(item.id)
 
-    if (!entry || entry.kind !== 'file' || item.role === 'episode' || item.role === 'ignore') {
+    if (
+      !entry ||
+      entry.kind !== 'file' ||
+      item.role === 'episode' ||
+      item.role === 'movie' ||
+      item.role === 'ignore'
+    ) {
       continue
     }
 
@@ -3431,11 +3499,29 @@ function buildAiRenameGroupPlan(groupEntries, classification, extensionSets, ope
       continue
     }
 
-    const newName = renderFolderName(
-      classification.series,
-      { ...item, season: item.season ?? classification.series.season },
-      entry.depth === 1,
-    )
+    let newName = ''
+
+    if (isTelevision) {
+      newName = renderFolderName(
+        classification.series,
+        { ...item, season: item.season ?? classification.series.season },
+        entry.depth === 1,
+      )
+    } else if (item.role === 'movie-folder') {
+      const linkedMovie = item.movieFor ? itemById.get(String(item.movieFor)) : undefined
+      const movie =
+        linkedMovie?.role === 'movie'
+          ? linkedMovie
+          : item.titleZh || item.titleOriginal
+            ? item
+            : movieItems.length === 1
+              ? movieItems[0]
+              : undefined
+
+      if (movie) {
+        newName = formatSeriesTitle({ ...movie, namingStyle: classification.namingStyle }, true)
+      }
+    }
 
     if (newName && isValidRenameBasename(newName)) {
       operations.push({
@@ -3471,10 +3557,13 @@ function buildAiRenameGroupPlan(groupEntries, classification, extensionSets, ope
     entries: groupEntries,
     entryById,
     itemById,
+    mediaType: classification.mediaType,
     operationRoot,
     operations,
-    seriesKey: `${normalizeComparableTitle(formatSeriesTitle(classification.series, false))}:${classification.series.year ?? ''}`,
-    seriesTitle: formatSeriesTitle(classification.series, true),
+    seriesKey: isTelevision
+      ? `${normalizeComparableTitle(formatSeriesTitle(classification.series, false))}:${classification.series.year ?? ''}`
+      : '',
+    seriesTitle: isTelevision ? formatSeriesTitle(classification.series, true) : '',
     topEntry,
     topRole,
     topSeason,
@@ -3813,7 +3902,7 @@ async function executeAiRenamePlan(job, storage, plan, allowMove, groupIndex, gr
   markDuplicateRenameTargets(storage, [plan])
 
   const operations = plan.operations.filter(
-    (operation) => !(allowMove === true && operation.isTopFolder),
+    (operation) => !(allowMove === true && plan.mediaType === 'tv' && operation.isTopFolder),
   )
   job.progress.totalOperations += operations.length
   setAiRenameJobStage(job, 'executing', `正在逐项修改第 ${groupIndex}/${groupCount} 个目录`)
@@ -3830,7 +3919,7 @@ async function executeAiRenamePlan(job, storage, plan, allowMove, groupIndex, gr
     await executeAiRenameOperation(job, storage, plan.operationRoot, operation)
   }
 
-  if (allowMove === true) {
+  if (allowMove === true && plan.mediaType === 'tv') {
     setAiRenameJobStage(job, 'moving', `正在整理第 ${groupIndex}/${groupCount} 个目录的标准季结构`)
     await executeAiMovePlan(job, storage, plan)
   }
@@ -3975,8 +4064,18 @@ async function runAiRenameJob(job, payload) {
         }
 
         const classification = normalizeAiClassification(suggestion.payload)
+        const mediaHint = inferAiRenameMediaHint(groupPath)
+
+        if (mediaHint === 'movie' && classification.mediaType === 'tv') {
+          throw new Error('AI 将电影目录识别为电视剧，已跳过以避免生成 SxxExx 名称')
+        }
+
+        classification.namingStyle = aiSettings.namingStyle
         classification.series.namingStyle = aiSettings.namingStyle
-        const tmdbResult = await verifySeriesWithTmdb(classification.series, aiSettings, job)
+        const tmdbResult =
+          classification.mediaType === 'tv'
+            ? await verifySeriesWithTmdb(classification.series, aiSettings, job)
+            : { series: classification.series }
         classification.series = tmdbResult.series
         job.progress.analyzed += groupEntries.length
 
@@ -3996,7 +4095,7 @@ async function runAiRenameJob(job, payload) {
           operationRoot,
         )
 
-        if (plan.seriesTitle) {
+        if (plan.mediaType !== 'tv' || plan.seriesTitle) {
           await executeAiRenamePlan(
             job,
             storage,
@@ -4018,7 +4117,7 @@ async function runAiRenameJob(job, payload) {
             job,
             {
               action: 'analyze',
-              message: 'AI 未生成有效的中英双语剧名',
+              message: 'AI 未生成有效的媒体名称',
               oldPath: groupEntries[0]?.path,
               status: 'failed',
             },
@@ -4030,16 +4129,20 @@ async function runAiRenameJob(job, payload) {
           throw new Error('AI_RENAME_CANCELLED')
         }
 
+        const errorMessage = getErrorMessage(error)
+        const isUnrecognizedTitle = ['AI 未识别出剧名', 'AI 未识别出电影名'].includes(errorMessage)
+        const isUnsafeMediaType = errorMessage.startsWith('AI 将电影目录识别为电视剧')
+        const shouldSkip = isUnrecognizedTitle || isUnsafeMediaType
         job.progress.totalOperations += 1
         appendAiRenameJobResult(
           job,
           {
             action: 'analyze',
-            message: getErrorMessage(error),
+            message: isUnrecognizedTitle ? 'AI 未识别出可靠媒体名称，已跳过' : errorMessage,
             oldPath: groupEntries[0]?.path,
-            status: 'failed',
+            status: shouldSkip ? 'skipped' : 'failed',
           },
-          'failed',
+          shouldSkip ? 'skipped' : 'failed',
         )
       } finally {
         job.progress.processedGroups = groupIndex
@@ -6467,13 +6570,23 @@ async function cleanupStaleStrmFiles({
   const retainedEntries = []
   const affectedDirectories = new Set()
   let deleted = 0
+  let detached = 0
   let failed = 0
   let missing = 0
   let shared = 0
 
   if (staleEntries.length === 0) {
     logLines.push('旧 STRM 清理完成：没有发现失效文件。')
-    return { deleted, failed, missing, removedDirectories: 0, retainedEntries, shared, stale: 0 }
+    return {
+      deleted,
+      detached,
+      failed,
+      missing,
+      removedDirectories: 0,
+      retainedEntries,
+      shared,
+      stale: 0,
+    }
   }
 
   logLines.push(`发现 ${staleEntries.length} 个失效 STRM，开始安全清理。`)
@@ -6493,9 +6606,8 @@ async function cleanupStaleStrmFiles({
     }
 
     if (!isSafeTaskFile) {
-      failed += 1
-      retainedEntries.push(entry)
-      logLines.push(`拒绝清理越界或非 STRM 索引项: ${staleFile}`)
+      detached += 1
+      logLines.push(`已移除历史或越界 STRM 索引（未删除磁盘文件）: ${staleFile}`)
       continue
     }
 
@@ -6524,11 +6636,12 @@ async function cleanupStaleStrmFiles({
     logLines,
   )
   logLines.push(
-    `旧 STRM 清理完成：删除 ${deleted} 个，已不存在 ${missing} 个，其他任务引用 ${shared} 个，失败 ${failed} 个，清理空目录 ${removedDirectories} 个。`,
+    `旧 STRM 清理完成：删除 ${deleted} 个，已不存在 ${missing} 个，移除历史索引 ${detached} 个，其他任务引用 ${shared} 个，失败 ${failed} 个，清理空目录 ${removedDirectories} 个。`,
   )
 
   return {
     deleted,
+    detached,
     failed,
     missing,
     removedDirectories,
@@ -6945,6 +7058,7 @@ async function executeTask(task, storage, strmSettings, settings = {}) {
   })
 
   let cleanupDeleted = 0
+  let cleanupDetached = 0
   let cleanupFailed = 0
   let cleanupMissing = 0
   let cleanupRemovedDirectories = 0
@@ -6977,6 +7091,7 @@ async function executeTask(task, storage, strmSettings, settings = {}) {
       task,
     })
     cleanupDeleted = cleanupResult.deleted
+    cleanupDetached = cleanupResult.detached
     cleanupFailed = cleanupResult.failed
     cleanupMissing = cleanupResult.missing
     cleanupRemovedDirectories = cleanupResult.removedDirectories
@@ -7038,6 +7153,7 @@ async function executeTask(task, storage, strmSettings, settings = {}) {
     log: logLines.text(),
     result: {
       cleanupDeleted,
+      cleanupDetached,
       cleanupFailed,
       cleanupMissing,
       cleanupRemovedDirectories,
