@@ -3,7 +3,7 @@
 ARG NODE_VERSION=22
 ARG GO_VERSION=1.26
 
-FROM node:${NODE_VERSION}-alpine AS app-web-builder
+FROM --platform=$BUILDPLATFORM node:${NODE_VERSION}-alpine AS app-web-builder
 
 WORKDIR /src
 
@@ -18,7 +18,7 @@ COPY src ./src
 
 RUN pnpm build
 
-FROM node:${NODE_VERSION}-alpine AS ge2o-web-builder
+FROM --platform=$BUILDPLATFORM node:${NODE_VERSION}-alpine AS ge2o-web-builder
 
 WORKDIR /src
 
@@ -29,7 +29,7 @@ RUN --mount=type=cache,target=/root/.npm npm ci
 COPY vendor/go-emby2openlist/web/src ./
 RUN npm run build
 
-FROM golang:${GO_VERSION}-alpine AS ge2o-builder
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS ge2o-builder
 
 ARG TARGETOS
 ARG TARGETARCH
