@@ -698,11 +698,15 @@ export function AiRenameTaskManagementPage() {
             <Progress percent={jobProgress(selectedJob)} />
             <div className="ai-rename-progress-grid">
               <span>
-                目录
+                提交目录
                 <strong>
                   {selectedJob.progress.processedGroups ?? 0}/
                   {selectedJob.progress.totalGroups ?? '-'}
                 </strong>
+                <small>
+                  总计 {selectedJob.progress.inventoryGroups ?? 0} · 增量跳过{' '}
+                  {selectedJob.progress.unchangedGroups ?? 0}
+                </small>
               </span>
               <span>
                 扫描<strong>{selectedJob.progress.scanned}</strong>

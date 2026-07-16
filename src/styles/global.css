@@ -1078,6 +1078,11 @@ a {
   font-size: 18px;
 }
 
+.ai-rename-progress-grid small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .plugin-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

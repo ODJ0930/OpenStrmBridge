@@ -1092,6 +1092,10 @@ async function deleteAiRenameIncrementalTaskState(taskId) {
   })
 }
 
+function getManagedAiRenameIncrementalStateKey(taskId) {
+  return `ai-rename-task:${String(taskId ?? '').trim()}`
+}
+
 async function readStrmIndex() {
   try {
     const content = await readFile(strmIndexFile, 'utf8')
@@ -2968,6 +2972,14 @@ function getAiRenameJobForClient(job) {
     currentPath: job.currentPath,
     finishedAt: job.finishedAt,
     id: job.id,
+    incrementalInventory: job.incrementalInventory
+      ? {
+          baselineUpdated: job.incrementalInventory.baselineUpdated === true,
+          inventoryGroups: job.incrementalInventory.inventoryGroups,
+          submittedGroups: job.incrementalInventory.submittedGroups,
+          unchangedGroups: job.incrementalInventory.unchangedGroups,
+        }
+      : undefined,
     message: job.message,
     path: job.path,
     progress: { ...job.progress },
@@ -3076,7 +3088,9 @@ async function scanAiRenameTree(storage, requestedPath, job, extensionSets) {
         name: entry.name,
         path: entry.path,
         relativePath: getRelativeStoragePath(storage, operationRoot, entry.path),
+        size: entry.kind === 'file' ? String(entry.size ?? '') : '',
         topId,
+        updatedAt: entry.kind === 'file' ? String(entry.updatedAt ?? '') : '',
       }
 
       entries.push(scannedEntry)
@@ -3202,6 +3216,8 @@ function createAiRenameGroupFingerprint(groupEntries) {
       kind: entry.kind,
       name: entry.name,
       relativePath: String(entry.relativePath ?? '').replaceAll('\\', '/'),
+      size: entry.kind === 'file' ? String(entry.size ?? '') : '',
+      updatedAt: entry.kind === 'file' ? String(entry.updatedAt ?? '') : '',
     }))
     .sort((first, second) => {
       return (
@@ -3214,7 +3230,7 @@ function createAiRenameGroupFingerprint(groupEntries) {
   return createHash('sha256').update(JSON.stringify(inventory)).digest('hex')
 }
 
-function createAiRenameConfigurationFingerprint(aiSettings) {
+function createAiRenameConfigurationFingerprint(aiSettings, taskOptions = {}) {
   return createHash('sha256')
     .update(
       JSON.stringify({
@@ -3227,6 +3243,8 @@ function createAiRenameConfigurationFingerprint(aiSettings) {
         tmdbBaseUrl: aiSettings.tmdbBaseUrl,
         tmdbEnabled: aiSettings.tmdbEnabled && Boolean(aiSettings.tmdbToken),
         tmdbLanguage: aiSettings.tmdbLanguage,
+        taskOptions,
+        version: 2,
       }),
     )
     .digest('hex')
@@ -3928,16 +3946,18 @@ async function executeAiRenamePlan(job, storage, plan, allowMove, groupIndex, gr
 async function runAiRenameJob(job, payload) {
   job.status = 'running'
   job.startedAt = new Date().toISOString()
+  let settings
+  let storage
 
   try {
     const storages = await readStorages()
-    const storage = storages.find((item) => item.id === payload.storageId)
+    storage = storages.find((item) => item.id === payload.storageId)
 
     if (!storage) {
       throw new Error('未找到存储记录')
     }
 
-    const settings = await readSettings()
+    settings = await readSettings()
     const aiSettings = normalizeAiRenameSettings({
       ...settings.aiRename,
       tmdbEnabled: payload.useTmdb === true && settings.aiRename?.tmdbEnabled === true,
@@ -3976,6 +3996,15 @@ async function runAiRenameJob(job, payload) {
     job.progress.inventoryGroups = allGroupRecords.length
     job.progress.unchangedGroups = unchangedGroupCount
     job.progress.totalGroups = groupRecords.length
+
+    if (job.taskId && payload.incrementalBaselineMessage) {
+      appendAiRenameJobResult(job, {
+        action: 'inventory',
+        message: String(payload.incrementalBaselineMessage),
+        oldPath: operationRoot,
+        status: payload.incrementalBaselineStatus === 'error' ? 'warning' : 'info',
+      })
+    }
 
     if (unchangedGroupCount > 0) {
       appendAiRenameJobResult(job, {
@@ -4157,11 +4186,13 @@ async function runAiRenameJob(job, payload) {
           ? 'partial'
           : 'failed'
         : 'completed'
-    setAiRenameJobStage(
-      job,
-      'finished',
-      `处理完成：成功 ${job.progress.succeeded}，跳过 ${job.progress.skipped}，失败 ${job.progress.failed}`,
-    )
+    const completionMessage = `处理完成：成功 ${job.progress.succeeded}，跳过 ${job.progress.skipped}，失败 ${job.progress.failed}`
+
+    if (payload.incrementalStateKey) {
+      job.message = completionMessage
+    } else {
+      setAiRenameJobStage(job, 'finished', completionMessage)
+    }
   } catch (error) {
     if (job.cancelRequested || error?.message === 'AI_RENAME_CANCELLED') {
       job.status = 'cancelled'
@@ -4176,6 +4207,49 @@ async function runAiRenameJob(job, payload) {
       })
     }
   } finally {
+    const terminalStatus = job.status
+    const completionMessage = job.message
+    const shouldUpdateIncrementalBaseline =
+      Boolean(job.taskId && payload.incrementalStateKey && payload.configurationFingerprint) &&
+      ['completed', 'partial'].includes(terminalStatus) &&
+      Boolean(storage && settings)
+
+    if (shouldUpdateIncrementalBaseline) {
+      job.status = 'running'
+      setAiRenameJobStage(job, 'scanning', '正在保存本次运行后的增量基线')
+
+      try {
+        const groupFingerprints =
+          job.incrementalInventory?.submittedGroups === 0
+            ? job.incrementalInventory.currentFingerprints
+            : await scanAiRenameInventoryFingerprints(storage, payload.path, settings)
+        await saveAiRenameIncrementalTaskState(payload.incrementalStateKey, {
+          configurationFingerprint: payload.configurationFingerprint,
+          groupFingerprints: [...new Set(groupFingerprints)].sort(),
+          path: payload.path,
+          storageId: payload.storageId,
+          updatedAt: new Date().toISOString(),
+        })
+        job.incrementalInventory.baselineUpdated = true
+        appendAiRenameJobResult(job, {
+          action: 'inventory',
+          message: `增量基线已更新：${groupFingerprints.length} 个视频目录；下次仅提交新增或变化目录`,
+          oldPath: payload.path,
+          status: 'info',
+        })
+      } catch (error) {
+        appendAiRenameJobResult(job, {
+          action: 'inventory',
+          message: `更新增量基线失败，下次将重新识别：${getErrorMessage(error)}`,
+          oldPath: payload.path,
+          status: 'warning',
+        })
+      } finally {
+        job.status = terminalStatus
+        setAiRenameJobStage(job, 'finished', completionMessage)
+      }
+    }
+
     job.currentPath = ''
     job.finishedAt = new Date().toISOString()
     activeAiRenameJobsByStorage.delete(job.storageId)
@@ -4404,6 +4478,9 @@ async function deleteAiRenameTask(taskId) {
   }
 
   await writeAiRenameTasks(tasks.filter((item) => item.id !== taskId))
+  await deleteAiRenameIncrementalTaskState(getManagedAiRenameIncrementalStateKey(taskId)).catch(
+    () => undefined,
+  )
   return true
 }
 
@@ -4428,13 +4505,51 @@ async function runAiRenameTask(taskId) {
     }
   }
 
+  const settings = await readSettings()
+  const aiSettings = normalizeAiRenameSettings(settings.aiRename)
+  const configurationFingerprint = createAiRenameConfigurationFingerprint(aiSettings, {
+    allowMove: task.allowMove === true,
+    extraPrompt: String(task.extraPrompt ?? '').trim(),
+    useTmdb: task.useTmdb === true,
+  })
+  const incrementalStateKey = getManagedAiRenameIncrementalStateKey(task.id)
+  let incrementalBaselineStatus = 'missing'
+  let incrementalBaselineMessage = '增量基线不存在或任务配置已变化，本次执行全量目录识别。'
+  let unchangedGroupFingerprints = []
+
+  try {
+    const incrementalState = await readAiRenameIncrementalState()
+    const taskState = incrementalState[incrementalStateKey]
+    const canReuseState =
+      taskState?.configurationFingerprint === configurationFingerprint &&
+      taskState?.storageId === task.storageId &&
+      taskState?.path === task.path &&
+      Array.isArray(taskState?.groupFingerprints)
+
+    if (canReuseState) {
+      unchangedGroupFingerprints = taskState.groupFingerprints.map((fingerprint) =>
+        String(fingerprint),
+      )
+      incrementalBaselineStatus = 'loaded'
+      incrementalBaselineMessage = `已加载增量基线：${unchangedGroupFingerprints.length} 个已处理视频目录。`
+    }
+  } catch (error) {
+    incrementalBaselineStatus = 'error'
+    incrementalBaselineMessage = `读取增量基线失败，本次回退全量识别：${getErrorMessage(error)}`
+  }
+
   const payload = {
     allowMove: task.allowMove,
+    configurationFingerprint,
     extraPrompt: task.extraPrompt,
+    incrementalBaselineMessage,
+    incrementalBaselineStatus,
+    incrementalStateKey,
     path: task.path,
     recursive: true,
     storageId: task.storageId,
     taskId: task.id,
+    unchangedGroupFingerprints,
     useTmdb: task.useTmdb,
   }
   const job = await createAiRenameJob(payload, { deferStart: true })
@@ -6961,24 +7076,25 @@ async function runPreStrmAiRename(task, storage, settings, logLines) {
 
   if (result.status === 'partial') {
     logLines.push('AI 重命名存在跳过或失败项目，将基于当前云盘状态继续生成 STRM。')
-    logLines.push('本次存在失败或跳过项目，未更新 AI 增量基线，下次运行会继续重试变化目录。')
-  } else {
-    try {
-      const groupFingerprints =
-        incrementalInventory.submittedGroups === 0
-          ? incrementalInventory.currentFingerprints
-          : await scanAiRenameInventoryFingerprints(storage, task.path, settings)
-      await saveAiRenameIncrementalTaskState(task.id, {
-        configurationFingerprint,
-        groupFingerprints: [...new Set(groupFingerprints)].sort(),
-        path: task.path,
-        storageId: task.storageId,
-        updatedAt: new Date().toISOString(),
-      })
-      logLines.push(`AI 增量基线已更新：${groupFingerprints.length} 个视频目录。`)
-    } catch (error) {
-      logLines.push(`更新 AI 增量基线失败，下次将重新识别: ${getErrorMessage(error)}`)
-    }
+  }
+
+  try {
+    const groupFingerprints =
+      incrementalInventory.submittedGroups === 0
+        ? incrementalInventory.currentFingerprints
+        : await scanAiRenameInventoryFingerprints(storage, task.path, settings)
+    await saveAiRenameIncrementalTaskState(task.id, {
+      configurationFingerprint,
+      groupFingerprints: [...new Set(groupFingerprints)].sort(),
+      path: task.path,
+      storageId: task.storageId,
+      updatedAt: new Date().toISOString(),
+    })
+    logLines.push(
+      `AI 增量基线已更新：${groupFingerprints.length} 个视频目录；下次仅提交新增或变化目录。`,
+    )
+  } catch (error) {
+    logLines.push(`更新 AI 增量基线失败，下次将重新识别: ${getErrorMessage(error)}`)
   }
 
   logLines.push('------------------------------------------------------------')

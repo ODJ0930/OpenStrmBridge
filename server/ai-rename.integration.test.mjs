@@ -141,11 +141,14 @@ describe('AI rename local-storage integration', () => {
     await writeFile(path.join(seasonTwoDirectory, 'Rick.and.Morty.S02E01.mkv'), 'season-2')
     managedLibraryDirectory = path.join(tempDirectory, 'managed-library')
     const managedSeasonDirectory = path.join(managedLibraryDirectory, 'Rick.and.Morty.S05.1080p')
+    const managedUnknownDirectory = path.join(managedLibraryDirectory, 'Unknown.Show')
     await mkdir(managedSeasonDirectory, { recursive: true })
+    await mkdir(managedUnknownDirectory, { recursive: true })
     await writeFile(
       path.join(managedSeasonDirectory, 'Rick.and.Morty.S05E01.mkv'),
       'managed-season',
     )
+    await writeFile(path.join(managedUnknownDirectory, 'Unknown.Video.mkv'), 'unknown')
     preStrmLibraryDirectory = path.join(tempDirectory, 'pre-strm-library')
     const preStrmSeasonDirectory = path.join(preStrmLibraryDirectory, 'Rick.and.Morty.S07.1080p')
     await mkdir(preStrmSeasonDirectory, { recursive: true })
@@ -197,6 +200,15 @@ describe('AI rename local-storage integration', () => {
       inventoryRequestGroupCounts.push(inventory.length)
       const groups = inventory.map((group) => {
         const entries = group.entries
+
+        if (/Unknown\.Show/i.test(group.directoryName)) {
+          return {
+            groupId: group.groupId,
+            items: entries.map((entry) => ({ id: entry.id, role: 'ignore' })),
+            mediaType: 'tv',
+            series: null,
+          }
+        }
 
         if (/Fast\s*&\s*Furious/i.test(group.directoryName)) {
           const movies = [
@@ -835,13 +847,88 @@ describe('AI rename local-storage integration', () => {
       ).json()
     }
 
-    expect(job.status, JSON.stringify(job, null, 2)).toBe('completed')
+    expect(job.status, JSON.stringify(job, null, 2)).toBe('partial')
     expect(job.taskId).toBe(taskId)
-    expect(
-      await readdir(
-        path.join(managedLibraryDirectory, '瑞克和莫蒂 (Rick and Morty) (2013) - Season 05'),
-      ),
-    ).toContain('瑞克和莫蒂 (Rick and Morty) - S05E01.mkv')
+    expect(job.incrementalInventory).toMatchObject({
+      baselineUpdated: true,
+      inventoryGroups: 2,
+      submittedGroups: 2,
+      unchangedGroups: 0,
+    })
+    const renamedManagedDirectory = path.join(
+      managedLibraryDirectory,
+      '瑞克和莫蒂 (Rick and Morty) (2013) - Season 05',
+    )
+    const renamedManagedFile = path.join(
+      renamedManagedDirectory,
+      '瑞克和莫蒂 (Rick and Morty) - S05E01.mkv',
+    )
+    expect(await readdir(renamedManagedDirectory)).toContain(path.basename(renamedManagedFile))
+
+    const aiRequestCountAfterInitialRun = aiRequestPayloads.length
+    const unchangedRunResponse = await fetch(
+      `${backendBaseUrl}/api/ai-rename/tasks/${encodeURIComponent(taskId)}/run`,
+      { headers, method: 'POST' },
+    )
+    expect(unchangedRunResponse.status).toBe(202)
+    job = (await unchangedRunResponse.json()).job
+
+    for (
+      let attempt = 0;
+      attempt < 100 && !['completed', 'partial', 'failed'].includes(job.status);
+      attempt += 1
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      job = await (
+        await fetch(`${backendBaseUrl}/api/ai-rename/tasks/${encodeURIComponent(taskId)}/result`, {
+          headers,
+        })
+      ).json()
+    }
+
+    expect(job.status, JSON.stringify(job, null, 2)).toBe('completed')
+    expect(job.incrementalInventory).toMatchObject({
+      baselineUpdated: true,
+      inventoryGroups: 2,
+      submittedGroups: 0,
+      unchangedGroups: 2,
+    })
+    expect(aiRequestPayloads).toHaveLength(aiRequestCountAfterInitialRun)
+    expect(job.results).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ message: expect.stringContaining('本次未调用 AI') }),
+      ]),
+    )
+
+    await writeFile(renamedManagedFile, 'managed-season-content-updated')
+    const changedRunResponse = await fetch(
+      `${backendBaseUrl}/api/ai-rename/tasks/${encodeURIComponent(taskId)}/run`,
+      { headers, method: 'POST' },
+    )
+    expect(changedRunResponse.status).toBe(202)
+    job = (await changedRunResponse.json()).job
+
+    for (
+      let attempt = 0;
+      attempt < 100 && !['completed', 'partial', 'failed'].includes(job.status);
+      attempt += 1
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      job = await (
+        await fetch(`${backendBaseUrl}/api/ai-rename/tasks/${encodeURIComponent(taskId)}/result`, {
+          headers,
+        })
+      ).json()
+    }
+
+    expect(job.status, JSON.stringify(job, null, 2)).toBe('completed')
+    expect(job.incrementalInventory).toMatchObject({
+      baselineUpdated: true,
+      inventoryGroups: 2,
+      submittedGroups: 1,
+      unchangedGroups: 1,
+    })
+    expect(aiRequestPayloads).toHaveLength(aiRequestCountAfterInitialRun + 1)
 
     const deleteResponse = await fetch(
       `${backendBaseUrl}/api/ai-rename/tasks/${encodeURIComponent(taskId)}`,

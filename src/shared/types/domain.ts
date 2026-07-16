@@ -194,6 +194,12 @@ export interface AiRenameJob {
   currentPath: string
   finishedAt?: string
   id: string
+  incrementalInventory?: {
+    baselineUpdated?: boolean
+    inventoryGroups: number
+    submittedGroups: number
+    unchangedGroups: number
+  }
   message: string
   path: string
   progress: AiRenameJobProgress
