@@ -1,0 +1,27 @@
+services:
+  openstrmbridge:
+    image: diead/openstrmbridge:${OPENSTRMBRIDGE_TAG:-v0.1.7}
+    container_name: openstrmbridge
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      OPENSTRMBRIDGE_BACKEND_HOST: 0.0.0.0
+      OPENSTRMBRIDGE_BACKEND_PORT: 5174
+      OPENSTRMBRIDGE_DATA_DIR: /app/data
+      OPENSTRMBRIDGE_WEB_DIR: /app/dist
+      OPENSTRMBRIDGE_GE2O_BINARY: /app/resources/bin/ge2o
+      OPENSTRMBRIDGE_BACKEND_PUBLIC_URL: ${OPENSTRMBRIDGE_BACKEND_PUBLIC_URL:-http://127.0.0.1:5174}
+      OPENSTRMBRIDGE_STRM_DIR: /app/strm
+      OPENSTRMBRIDGE_EMBY_MOUNT_PATH: ${OPENSTRMBRIDGE_EMBY_MOUNT_PATH:-/media/strm}
+    ports:
+      - '${OPENSTRMBRIDGE_PORT:-5174}:5174'
+      - '${OPENSTRMBRIDGE_PROXY_PORT:-8097}:8097'
+    volumes:
+      - ./docker-data:/app/data
+      - ./docker-strm:/app/strm
+      # 使用本地存储时，将宿主机媒体目录挂载进容器并在后台选择 /media：
+      # - /path/to/media:/media
+      # 需要管理宿主机 Docker 中的 Emby 时，可同时挂载 Docker Socket：
+      # - /var/run/docker.sock:/var/run/docker.sock
+    extra_hosts:
+      - host.docker.internal:host-gateway

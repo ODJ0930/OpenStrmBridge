@@ -1,0 +1,16 @@
+.git
+.github
+.idea
+.release-cache
+.vscode
+data
+dist
+logs
+node_modules
+release
+*.log
+*.local
+**/node_modules
+vendor/go-emby2openlist/web/dist
+vendor/go-emby2openlist/web/src/build
+vendor/go-emby2openlist/web/src/.react-router
