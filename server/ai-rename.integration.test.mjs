@@ -109,6 +109,7 @@ describe('AI rename local-storage integration', () => {
   let managedLibraryDirectory
   let managedNestedLibraryDirectory
   let movieLibraryDirectory
+  let multiVersionLibraryDirectory
   let moveLibraryDirectory
   let nestedLibraryDirectory
   let preStrmLibraryDirectory
@@ -135,6 +136,23 @@ describe('AI rename local-storage integration', () => {
     await mkdir(movieCollectionDirectory, { recursive: true })
     await writeFile(path.join(movieCollectionDirectory, 'Fast & Furious - S01E01.mp4'), 'movie-1')
     await writeFile(path.join(movieCollectionDirectory, 'Fast & Furious - S01E02.mp4'), 'movie-2')
+    multiVersionLibraryDirectory = path.join(tempDirectory, 'multi-version-library')
+    const multiVersionMovieDirectory = path.join(multiVersionLibraryDirectory, '电影')
+    await mkdir(multiVersionMovieDirectory, { recursive: true })
+    await writeFile(
+      path.join(
+        multiVersionMovieDirectory,
+        'The.Furious.2026.2160p.iT.WEB-DL.DDP5.1.Atmos.H.265-OGGY.mkv',
+      ),
+      'furious-standard',
+    )
+    await writeFile(
+      path.join(
+        multiVersionMovieDirectory,
+        'The.Furious.2026.2160p.MA.WEBDL.DDP5.1.Atmos.DV.HDR.H.265-Draken02.mkv',
+      ),
+      'furious-dv-hdr',
+    )
     moveLibraryDirectory = path.join(tempDirectory, 'move-library')
     const seasonOneDirectory = path.join(moveLibraryDirectory, 'Rick.and.Morty.S01.1080p')
     const seasonTwoDirectory = path.join(moveLibraryDirectory, 'Rick.and.Morty.S02.1080p')
@@ -232,6 +250,25 @@ describe('AI rename local-storage integration', () => {
       inventoryRequests.push(inventory)
       const groups = inventory.map((group) => {
         const entries = group.entries
+
+        if (/The\.Furious/i.test(JSON.stringify(entries))) {
+          return {
+            groupId: group.groupId,
+            items: entries.map((entry) =>
+              /\.(?:mp4|mkv)$/i.test(entry.name)
+                ? {
+                    id: entry.id,
+                    role: 'movie',
+                    titleOriginal: 'The Furious',
+                    titleZh: '狂怒',
+                    year: 2026,
+                  }
+                : { id: entry.id, role: 'ignore' },
+            ),
+            mediaType: 'movie',
+            series: null,
+          }
+        }
 
         if (/Unknown\.Show/i.test(group.directoryName)) {
           return {
@@ -524,6 +561,15 @@ describe('AI rename local-storage integration', () => {
           local: { path: movieLibraryDirectory },
           name: '本地电影合集测试',
           rootPath: movieLibraryDirectory,
+          status: 'connected',
+        },
+        {
+          accessMethod: 'local',
+          endpoint: multiVersionLibraryDirectory,
+          id: 'local-multi-version-test',
+          local: { path: multiVersionLibraryDirectory },
+          name: '本地电影多版本测试',
+          rootPath: multiVersionLibraryDirectory,
           status: 'connected',
         },
         {
@@ -867,17 +913,82 @@ describe('AI rename local-storage integration', () => {
     }
 
     expect(job.status, JSON.stringify(job, null, 2)).toBe('completed')
-    expect(job.progress).toMatchObject({ failed: 0, skipped: 0, succeeded: 2 })
+    expect(job.progress).toMatchObject({ failed: 0, skipped: 0, succeeded: 4 })
     const collectionDirectory = path.join(movieLibraryDirectory, 'Fast & Furious Collection')
+    expect(
+      await readdir(path.join(collectionDirectory, '速度与激情 (The Fast and the Furious) (2001)')),
+    ).toContain('速度与激情 (The Fast and the Furious) (2001).mp4')
+    expect(
+      await readdir(path.join(collectionDirectory, '速度与激情2 (2 Fast 2 Furious) (2003)')),
+    ).toContain('速度与激情2 (2 Fast 2 Furious) (2003).mp4')
     const names = await readdir(collectionDirectory)
     expect(names).toEqual(
       expect.arrayContaining([
-        '速度与激情 (The Fast and the Furious) (2001).mp4',
-        '速度与激情2 (2 Fast 2 Furious) (2003).mp4',
+        '速度与激情 (The Fast and the Furious) (2001)',
+        '速度与激情2 (2 Fast 2 Furious) (2003)',
       ]),
     )
     expect(names).not.toContain('Season 01')
     expect(names.some((name) => /S01E\d+/i.test(name))).toBe(false)
+  }, 20_000)
+
+  it('keeps multiple movie versions unique and moves them into one Emby movie folder', async () => {
+    const headers = {
+      'Content-Type': 'application/json',
+      Origin: backendBaseUrl,
+      Referer: `${backendBaseUrl}/ai-rename-tasks`,
+    }
+    const createResponse = await fetch(`${backendBaseUrl}/api/storage/ai-rename/jobs`, {
+      body: JSON.stringify({
+        allowMove: true,
+        path: multiVersionLibraryDirectory,
+        recursive: true,
+        storageId: 'local-multi-version-test',
+        useTmdb: false,
+      }),
+      headers,
+      method: 'POST',
+    })
+    expect(createResponse.status).toBe(202)
+    let job = await createResponse.json()
+
+    for (
+      let attempt = 0;
+      attempt < 100 && !['completed', 'partial', 'failed'].includes(job.status);
+      attempt += 1
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      job = await (
+        await fetch(`${backendBaseUrl}/api/storage/ai-rename/jobs/${encodeURIComponent(job.id)}`, {
+          headers,
+        })
+      ).json()
+    }
+
+    expect(job.status, JSON.stringify(job, null, 2)).toBe('completed')
+    expect(job.progress).toMatchObject({ failed: 0, skipped: 0, succeeded: 4 })
+    expect(job.results.some((result) => result.message.includes('相同目标名称'))).toBe(false)
+    const movieDirectory = path.join(
+      multiVersionLibraryDirectory,
+      '电影',
+      '狂怒 (The Furious) (2026)',
+    )
+    const names = await readdir(movieDirectory)
+    expect(names).toEqual(
+      expect.arrayContaining([
+        '狂怒 (The Furious) (2026) - 2160p WEB-DL H.265 Atmos OGGY.mkv',
+        '狂怒 (The Furious) (2026) - 2160p DV HDR WEB-DL H.265 Atmos Draken02.mkv',
+      ]),
+    )
+    expect(
+      await readFile(
+        path.join(
+          movieDirectory,
+          '狂怒 (The Furious) (2026) - 2160p DV HDR WEB-DL H.265 Atmos Draken02.mkv',
+        ),
+        'utf8',
+      ),
+    ).toBe('furious-dv-hdr')
   }, 20_000)
 
   it('creates and merges standard season directories when moving is enabled', async () => {

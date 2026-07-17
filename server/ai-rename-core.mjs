@@ -222,11 +222,112 @@ export function renderMovieFileName(movie, originalName, namingStyle) {
     return ''
   }
 
-  const version = sanitizeNameSegment(movie?.version || movie?.edition)
+  const versionLabel = sanitizeNameSegment(movie?.versionLabel)
+  const edition = sanitizeNameSegment(movie?.edition)
+  const version = sanitizeNameSegment(movie?.version)
+  const selectedVersion =
+    versionLabel ||
+    [edition, version]
+      .filter((value, index, values) => {
+        return (
+          value &&
+          values.findIndex((candidate) => candidate.toLowerCase() === value.toLowerCase()) === index
+        )
+      })
+      .join(' ')
   const part = sanitizeNameSegment(movie?.part)
-  const suffix = [version, part].filter(Boolean).join('-')
+  const suffix = [selectedVersion, part].filter(Boolean).join('-')
 
   return `${title}${suffix ? ` - ${suffix}` : ''}${extension}`
+}
+
+export function extractMovieVersionLabel(originalName) {
+  const parsed = path.posix.parse(String(originalName ?? '').replaceAll('\\', '/'))
+  const source = parsed.name
+  const normalized = source
+    .normalize('NFKC')
+    .replace(/[._[\](){}]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  const labels = []
+  const add = (label) => {
+    const sanitized = sanitizeNameSegment(label)
+
+    if (!sanitized || labels.some((item) => item.toLowerCase() === sanitized.toLowerCase())) {
+      return
+    }
+
+    labels.push(sanitized)
+  }
+  const editionPatterns = [
+    ['Directors Cut', /\b(?:director'?s|directors)\s+cut\b|导演剪辑/i],
+    ['Extended', /\bextended(?:\s+(?:cut|edition))?\b|加长版?/i],
+    ['Remastered', /\bremaster(?:ed)?\b|重制版?/i],
+    ['Theatrical', /\btheatrical(?:\s+cut)?\b|剧场版/i],
+    ['Unrated', /\bunrated\b|未分级|未删减/i],
+    ['Final Cut', /\bfinal\s+cut\b/i],
+    ['Open Matte', /\bopen\s+matte\b/i],
+    ['IMAX', /\bimax\b/i],
+    ['3D', /\b(?:3d|hsbs|hou)\b/i],
+  ]
+
+  for (const [label, pattern] of editionPatterns) {
+    if (pattern.test(normalized)) add(label)
+  }
+
+  const resolution = normalized.match(/\b(4320|2160|1440|1080|720|576|480)\s*([pi])\b/i)
+
+  if (resolution) {
+    add(`${resolution[1]}${resolution[2].toLowerCase()}`)
+  } else if (/\b8k\b/i.test(normalized)) {
+    add('8K')
+  } else if (/\b4k\b/i.test(normalized)) {
+    add('4K')
+  }
+
+  if (/\b(?:dolby\s*vision|dovi|dv)\b/i.test(normalized)) add('DV')
+  if (/\bhdr10\s*\+|\bhdr10plus\b/i.test(normalized)) {
+    add('HDR10+')
+  } else if (/\bhdr10\b/i.test(normalized)) {
+    add('HDR10')
+  } else if (/\bhdr\b/i.test(normalized)) {
+    add('HDR')
+  } else if (/\bsdr\b/i.test(normalized)) {
+    add('SDR')
+  }
+
+  if (/\b(?:bd\s*)?remux\b/i.test(normalized)) {
+    add('Remux')
+  } else if (/\bblu\s*ray\b|\bbluray\b|\bbdrip\b/i.test(normalized)) {
+    add('BluRay')
+  } else if (/\bweb\s*-?\s*dl\b|\bwebdl\b/i.test(normalized)) {
+    add('WEB-DL')
+  } else if (/\bweb\s*-?\s*rip\b|\bwebrip\b/i.test(normalized)) {
+    add('WEBRip')
+  } else if (/\bhdtv\b/i.test(normalized)) {
+    add('HDTV')
+  }
+
+  if (/\bav1\b/i.test(normalized)) {
+    add('AV1')
+  } else if (/\b(?:h\s*\.?\s*265|x265|hevc)\b/i.test(normalized)) {
+    add('H.265')
+  } else if (/\b(?:h\s*\.?\s*264|x264|avc)\b/i.test(normalized)) {
+    add('H.264')
+  }
+
+  if (/\batmos\b/i.test(normalized)) add('Atmos')
+  if (/\btruehd\b/i.test(normalized)) add('TrueHD')
+  if (/\bdts\s*-?\s*x\b/i.test(normalized)) add('DTS-X')
+  if (/\bdts\s*-?\s*hd(?:\s*ma)?\b/i.test(normalized)) add('DTS-HD MA')
+
+  const releaseGroup = source.match(/-([A-Za-z0-9]{2,30})$/)?.[1]
+
+  if (releaseGroup && !/^(?:cd|disc|disk|part|pt)\d+$/i.test(releaseGroup)) {
+    add(releaseGroup.replace(/[._]+/g, ' '))
+  }
+
+  return labels.slice(0, 7).join(' ')
 }
 
 export function renderFolderName(series, item, isTopLevel) {

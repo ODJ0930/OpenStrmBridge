@@ -17,6 +17,7 @@ import { Readable } from 'node:stream'
 import { fileURLToPath } from 'node:url'
 
 import {
+  extractMovieVersionLabel,
   formatSeasonDirectory,
   formatSeriesTitle,
   getLowerExtension,
@@ -66,7 +67,7 @@ const defaultAiRenamePromptTemplate = [
   '广告图片、网站宣传文件、发布组与画质编码信息应忽略；无法可靠识别的条目不要猜测。',
   '字幕、NFO、海报等附属文件只在能可靠关联视频时标记。',
 ].join('\n')
-const AI_RENAME_LOGICAL_GROUPING_VERSION = 4
+const AI_RENAME_LOGICAL_GROUPING_VERSION = 5
 const port = Number.parseInt(process.env.OPENSTRMBRIDGE_BACKEND_PORT ?? '', 10) || DEFAULT_PORT
 const host = process.env.OPENSTRMBRIDGE_BACKEND_HOST?.trim() || '127.0.0.1'
 const dataDir = process.env.OPENSTRMBRIDGE_DATA_DIR ?? path.join(process.cwd(), 'data')
@@ -3168,11 +3169,12 @@ function createAiRenameInventoryPrompt(
     '每组必须返回 mediaType，值只能是 tv、movie、movie-collection。电视剧使用 series；电影的 series 必须为 null，片名和年份写在每个 movie item 中。',
     '输出结构：{"groups":[{"groupId":"输入的 groupId","mediaType":"tv","series":{"titleZh":"简体中文正式名","titleOriginal":"官方或通用英文名","year":2013,"season":1},"items":[...]}]}。',
     'titleOriginal 是英文显示名字段，即使原始语种是韩文、日文或其他语言，也必须返回官方或通用英文名，不得返回非英文原名。',
-    '后端会固定生成 Emby 标准名称。电视剧：“剧集显示名 (首播年份)/Season 01/剧集显示名 - S01E01.ext”；电影：“电影显示名 (年份)/电影显示名 (年份).ext”。',
+    '后端会固定生成 Emby 标准名称。电视剧：“剧集显示名 (首播年份)/Season 01/剧集显示名 - S01E01.ext”；单版本电影：“电影显示名 (年份)/电影显示名 (年份).ext”；多版本电影：“电影显示名 (年份)/电影显示名 (年份) - 版本标签.ext”。',
     '每个输入 groupId 必须在 groups 中恰好返回一次；不得合并、拆分或遗漏目录。',
     'items 中每项必须使用输入 id。role 只能是 series-folder、season-folder、episode、collection-folder、movie-folder、movie、sidecar、poster、fanart、tvshow-nfo、season-nfo、season-poster、ignore。',
     'episode 项包含 season、episodes（数字数组），可选 version（如 v2）和 part。',
     'movie 项必须包含 titleZh、titleOriginal、year，可选 version（如 v2）、edition 和 part；movie-folder 使用 movieFor 指向对应 movie id。',
+    '同一电影存在多个视频文件时，每个 movie 项必须返回相同的正式片名与年份，并用 edition 或 version 提供可读且不同的版本标签，例如 2160p DV HDR、1080p BluRay、Directors Cut；不得把其他版本标记为 ignore。若模型遗漏，后端会从原文件名提取画质、HDR、来源、编码与发布组作为稳定后备标签。',
     'sidecar 项必须用 sidecarFor 指向对应 episode 或 movie id；字幕可提供 language、forced、hearingImpaired。',
     '每个 eligible 文件或文件夹都应返回一项；广告图片、网站宣传图、无法可靠识别项使用 ignore。',
     '顶层单季目录标为 season-folder；包含多个季目录的剧集容器标为 series-folder；子季目录标为 season-folder。',
@@ -3960,6 +3962,102 @@ function applyAiRenameStructuralHints(classification, groupRecord) {
   return classification
 }
 
+function mergeAiRenameMovieVersionLabels(...values) {
+  const labels = []
+
+  for (const value of values) {
+    const label = String(value ?? '').trim()
+
+    if (!label) {
+      continue
+    }
+
+    const normalized = label.toLocaleLowerCase()
+
+    const matchingIndex = labels.findIndex((candidate) => {
+      const normalizedCandidate = candidate.toLocaleLowerCase()
+      return normalizedCandidate.includes(normalized) || normalized.includes(normalizedCandidate)
+    })
+
+    if (matchingIndex >= 0) {
+      if (normalized.length > labels[matchingIndex].length) {
+        labels[matchingIndex] = label
+      }
+      continue
+    }
+
+    labels.push(label)
+  }
+
+  return labels.join(' ').slice(0, 120).trim()
+}
+
+function createAiRenameMovieVersionLabels(movieItems, entryById, namingStyle) {
+  const recordsByMovie = new Map()
+  const labelsById = new Map()
+
+  for (const item of movieItems) {
+    const entry = entryById.get(item.id)
+    const movieTitle = formatSeriesTitle({ ...item, namingStyle }, true)
+
+    if (!entry || entry.kind !== 'file' || !movieTitle) {
+      continue
+    }
+
+    const key = normalizeComparableTitle(movieTitle)
+    const records = recordsByMovie.get(key) ?? []
+    records.push({ entry, item })
+    recordsByMovie.set(key, records)
+  }
+
+  for (const records of recordsByMovie.values()) {
+    if (records.length < 2) {
+      continue
+    }
+
+    const sortedRecords = [...records].sort(
+      (first, second) =>
+        first.entry.name.localeCompare(second.entry.name, 'en') ||
+        first.item.id.localeCompare(second.item.id, 'en'),
+    )
+    const candidates = sortedRecords.map(({ entry, item }) => {
+      const explicitLabel = mergeAiRenameMovieVersionLabels(item.edition, item.version)
+      const detectedLabel = extractMovieVersionLabel(entry.name)
+
+      return {
+        entry,
+        item,
+        label: mergeAiRenameMovieVersionLabels(explicitLabel, detectedLabel),
+      }
+    })
+    const keys = candidates.map(
+      ({ item, label }) =>
+        `${label.toLocaleLowerCase()}|${String(item.part ?? '')
+          .trim()
+          .toLocaleLowerCase()}`,
+    )
+    const duplicateKeys = new Set(
+      keys.filter((key, index) => keys.indexOf(key) !== index || keys.lastIndexOf(key) !== index),
+    )
+    const duplicateIndexesByKey = new Map()
+
+    for (const [index, candidate] of candidates.entries()) {
+      const key = keys[index]
+      let label = candidate.label
+
+      if (!label || duplicateKeys.has(key)) {
+        const duplicateIndex = (duplicateIndexesByKey.get(key) ?? 0) + 1
+        duplicateIndexesByKey.set(key, duplicateIndex)
+        label = mergeAiRenameMovieVersionLabels(label, `Version ${duplicateIndex}`)
+      }
+
+      labelsById.set(candidate.item.id, label)
+    }
+  }
+
+  return labelsById
+}
+
 function buildAiRenameGroupPlan(groupRecord, classification, extensionSets, operationRoot) {
   const { groupEntries } = groupRecord
   const entryById = new Map(groupEntries.map((entry) => [entry.id, entry]))
@@ -3971,6 +4069,11 @@ function buildAiRenameGroupPlan(groupRecord, classification, extensionSets, oper
   const topItem = topEntry ? itemById.get(topEntry.id) : undefined
   const isTelevision = classification.mediaType === 'tv'
   const movieItems = classifiedItems.filter((item) => item.role === 'movie')
+  const movieVersionLabels = createAiRenameMovieVersionLabels(
+    movieItems,
+    entryById,
+    classification.namingStyle,
+  )
 
   for (const item of classifiedItems) {
     const entry = entryById.get(item.id)
@@ -3992,7 +4095,11 @@ function buildAiRenameGroupPlan(groupRecord, classification, extensionSets, oper
           },
           entry.name,
         )
-      : renderMovieFileName(item, entry.name, classification.namingStyle)
+      : renderMovieFileName(
+          { ...item, versionLabel: movieVersionLabels.get(item.id) },
+          entry.name,
+          classification.namingStyle,
+        )
 
     if (newName && isValidRenameBasename(newName)) {
       mediaNamesById.set(item.id, newName)
@@ -4000,6 +4107,9 @@ function buildAiRenameGroupPlan(groupRecord, classification, extensionSets, oper
         depth: entry.depth,
         entryId: entry.id,
         kind: 'file',
+        movieFolderName: isTelevision
+          ? ''
+          : formatSeriesTitle({ ...item, namingStyle: classification.namingStyle }, true),
         newName,
         oldName: entry.name,
         sourcePath: entry.path,
@@ -4033,10 +4143,15 @@ function buildAiRenameGroupPlan(groupRecord, classification, extensionSets, oper
     )
 
     if (newName && isValidRenameBasename(newName)) {
+      const linkedMovie = item.sidecarFor ? itemById.get(String(item.sidecarFor)) : undefined
       operations.push({
         depth: entry.depth,
         entryId: entry.id,
         kind: 'file',
+        movieFolderName:
+          !isTelevision && linkedMovie?.role === 'movie'
+            ? formatSeriesTitle({ ...linkedMovie, namingStyle: classification.namingStyle }, true)
+            : '',
         newName,
         oldName: entry.name,
         sourcePath: entry.path,
@@ -4380,6 +4495,85 @@ async function moveFlatAiRenameFilesIntoSeasons(job, storage, plan, seriesDirect
   }
 }
 
+async function moveFlatAiRenameMoviesIntoFolders(job, storage, plan) {
+  const topItem = plan.topEntry ? plan.itemById.get(plan.topEntry.id) : undefined
+
+  if (topItem?.role === 'movie-folder') {
+    return
+  }
+
+  const movieOperations = plan.operations.filter(
+    (operation) => operation.kind === 'file' && operation.currentPath && operation.movieFolderName,
+  )
+
+  for (const operation of movieOperations) {
+    const sourcePath = operation.currentPath
+    const parentPath = getStorageParentPath(storage, sourcePath)
+
+    if (getStoragePathName(storage, parentPath) === operation.movieFolderName) {
+      continue
+    }
+
+    const movieDirectory = joinStoragePath(storage, parentPath, operation.movieFolderName)
+    const targetPath = joinStoragePath(
+      storage,
+      movieDirectory,
+      getStoragePathName(storage, sourcePath),
+    )
+    job.progress.totalOperations += 1
+
+    try {
+      assertStoragePathInside(storage, targetPath, plan.operationRoot)
+      await ensureStorageDirectory(storage, movieDirectory, plan.operationRoot, job.pathState)
+
+      if (
+        storagePathStateHas(job.pathState, storage, targetPath) ||
+        (!job.pathState && (await storageEntryExists(storage, targetPath)))
+      ) {
+        appendAiRenameJobResult(
+          job,
+          {
+            action: 'move',
+            message: '目标电影目录中已存在同名版本',
+            newPath: targetPath,
+            oldPath: sourcePath,
+            status: 'skipped',
+          },
+          'skipped',
+        )
+        continue
+      }
+
+      const movedPath = await moveStorageEntry(storage, sourcePath, movieDirectory)
+      operation.currentPath = movedPath
+      moveStoragePathState(job.pathState, storage, sourcePath, movedPath)
+      appendAiRenameJobResult(
+        job,
+        {
+          action: 'move',
+          message: '电影文件已归入标准电影目录',
+          newPath: movedPath,
+          oldPath: sourcePath,
+          status: 'succeeded',
+        },
+        'succeeded',
+      )
+    } catch (error) {
+      appendAiRenameJobResult(
+        job,
+        {
+          action: 'move',
+          message: getErrorMessage(error),
+          newPath: targetPath,
+          oldPath: sourcePath,
+          status: 'failed',
+        },
+        'failed',
+      )
+    }
+  }
+}
+
 async function moveAiRenameSeasonFolder(job, storage, plan, topEntry, season) {
   job.progress.totalOperations += 1
   const topSourcePath = topEntry.path
@@ -4608,6 +4802,13 @@ async function executeAiRenamePlan(job, storage, plan, allowMove, groupIndex, gr
       `正在整理第 ${groupIndex}/${groupCount} 个逻辑媒体组的标准季结构`,
     )
     await executeAiMovePlan(job, storage, plan)
+  } else if (allowMove === true) {
+    setAiRenameJobStage(
+      job,
+      'moving',
+      `正在整理第 ${groupIndex}/${groupCount} 个逻辑媒体组的标准电影目录`,
+    )
+    await moveFlatAiRenameMoviesIntoFolders(job, storage, plan)
   }
 }
 

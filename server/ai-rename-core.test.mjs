@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  extractMovieVersionLabel,
   formatEpisodeToken,
   formatSeriesTitle,
   isValidRenameBasename,
@@ -84,6 +85,29 @@ describe('AI rename deterministic naming', () => {
         series: null,
       }),
     ).toMatchObject({ mediaType: 'movie-collection', series: { titleZh: '' } })
+  })
+
+  it('keeps Emby-compatible labels for multiple movie versions', () => {
+    expect(
+      extractMovieVersionLabel('The.Furious.2026.2160p.iT.WEB-DL.DDP5.1.Atmos.H.265-OGGY.mkv'),
+    ).toBe('2160p WEB-DL H.265 Atmos OGGY')
+    expect(
+      extractMovieVersionLabel(
+        'The.Furious.2026.2160p.MA.WEBDL.DDP5.1.Atmos.DV.HDR.H.265-Draken02.mkv',
+      ),
+    ).toBe('2160p DV HDR WEB-DL H.265 Atmos Draken02')
+    expect(
+      renderMovieFileName(
+        {
+          titleOriginal: 'The Furious',
+          titleZh: '狂怒',
+          versionLabel: '2160p DV HDR WEB-DL',
+          year: 2026,
+        },
+        'The.Furious.2026.mkv',
+        'zh-en',
+      ),
+    ).toBe('狂怒 (The Furious) (2026) - 2160p DV HDR WEB-DL.mkv')
   })
 
   it('supports Chinese-first, English-first and single-language naming rules', () => {
