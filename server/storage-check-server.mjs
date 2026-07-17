@@ -33,6 +33,7 @@ import {
   renderFolderName,
   renderMovieFileName,
   renderSidecarFileName,
+  resolveAiRenameJobStatus,
 } from './ai-rename-core.mjs'
 
 const DEFAULT_PORT = 5174
@@ -1458,6 +1459,22 @@ function normalizeTaskStatus(status) {
   return 'idle'
 }
 
+function resolvePersistedTaskStatus(task = {}) {
+  const status = normalizeTaskStatus(task.status)
+  const lastResult = task.lastResult
+
+  if (
+    status === 'partial' &&
+    lastResult &&
+    Number(lastResult.aiRenameFailed ?? 0) === 0 &&
+    getTaskRunCompletionStatus(lastResult) === 'succeeded'
+  ) {
+    return 'succeeded'
+  }
+
+  return status
+}
+
 function getTaskStorageId(task, storages) {
   const storageValue = task.storage && typeof task.storage === 'object' ? task.storage : {}
   const storageId = firstText(task.storageId, task.storage_id, task.storageID, storageValue.id)
@@ -1504,7 +1521,7 @@ function normalizeTask(task, storages, strmSettings, options = {}) {
     path: firstText(task.path, task.scanPath, task.scan_path, task.sourcePath) || '/',
     schedule,
     nextRun: options.preserveNextRun && nextRun ? nextRun : calculateNextRun(schedule),
-    status: normalizeTaskStatus(task.status),
+    status: resolvePersistedTaskStatus(task),
     aiRenameBeforeStrm: firstBoolean(
       false,
       task.aiRenameBeforeStrm,
@@ -2967,6 +2984,8 @@ function getAiRenameJobRoute(requestUrl) {
 }
 
 function getAiRenameJobForClient(job) {
+  const status = job.stage === 'finished' ? resolveAiRenameJobStatus(job.progress) : job.status
+
   return {
     allowMove: job.allowMove,
     createdAt: job.createdAt,
@@ -2987,7 +3006,7 @@ function getAiRenameJobForClient(job) {
     results: job.results.map((result) => ({ ...result })),
     stage: job.stage,
     startedAt: job.startedAt,
-    status: job.status,
+    status,
     storageId: job.storageId,
     taskId: job.taskId,
     useTmdb: job.useTmdb,
@@ -4832,13 +4851,14 @@ async function runAiRenameJob(job, payload) {
 
     throwIfAiRenameCancelled(job)
 
-    job.status =
-      job.progress.failed > 0 || job.progress.skipped > 0
-        ? job.progress.succeeded > 0
-          ? 'partial'
-          : 'failed'
-        : 'completed'
-    const completionMessage = `处理完成：成功 ${job.progress.succeeded}，跳过 ${job.progress.skipped}，失败 ${job.progress.failed}`
+    job.status = resolveAiRenameJobStatus(job.progress)
+    const completionPrefix =
+      job.status === 'failed'
+        ? '处理失败'
+        : job.status === 'partial'
+          ? '处理结束（部分项目需检查）'
+          : '处理完成'
+    const completionMessage = `${completionPrefix}：成功 ${job.progress.succeeded}，跳过 ${job.progress.skipped}，失败 ${job.progress.failed}`
 
     if (payload.incrementalStateKey) {
       job.message = completionMessage
@@ -5052,6 +5072,7 @@ async function readAiRenameTasksForClient() {
 
   return tasks.map((task) => {
     const activeJob = task.currentJobId ? aiRenameJobs.get(task.currentJobId) : undefined
+    const lastJob = task.lastJob ? getAiRenameJobForClient(task.lastJob) : undefined
 
     if (activeJob) {
       return {
@@ -5062,14 +5083,18 @@ async function readAiRenameTasksForClient() {
     }
 
     if (task.currentJobId) {
-      const lastStatus = task.lastJob?.status
+      const lastStatus = lastJob?.status
       const status = ['completed', 'partial', 'failed', 'cancelled'].includes(lastStatus)
         ? lastStatus
         : 'failed'
-      return { ...task, currentJobId: '', status }
+      return { ...task, currentJobId: '', lastJob, status }
     }
 
-    return task
+    const status =
+      lastJob && ['completed', 'partial', 'failed', 'cancelled'].includes(task.status)
+        ? lastJob.status
+        : task.status
+    return { ...task, lastJob, status }
   })
 }
 
@@ -5251,7 +5276,11 @@ async function getAiRenameTaskResult(taskId) {
   }
 
   const activeJob = task.currentJobId ? aiRenameJobs.get(task.currentJobId) : undefined
-  return activeJob ? getAiRenameJobForClient(activeJob) : task.lastJob || null
+  return activeJob
+    ? getAiRenameJobForClient(activeJob)
+    : task.lastJob
+      ? getAiRenameJobForClient(task.lastJob)
+      : null
 }
 
 function getAiRenameTaskRoute(requestUrl) {
@@ -7587,16 +7616,7 @@ function getTaskRunCompletionStatus(result = {}) {
     return 'succeeded'
   }
 
-  if (
-    failed === 0 &&
-    generated === 0 &&
-    skipped > 0 &&
-    failedDirectories === 0 &&
-    !scanLimitReached
-  ) {
-    return 'succeeded'
-  }
-
+  // An unchanged existing STRM is an idempotent success, so skipped files count as completed work.
   if (completedMediaFiles > 0 || mediaFiles > failed) {
     return 'partial'
   }
@@ -7732,7 +7752,7 @@ async function runPreStrmAiRename(task, storage, settings, logLines) {
   }
 
   if (result.status === 'partial') {
-    logLines.push('AI 重命名存在跳过或失败项目，将基于当前云盘状态继续生成 STRM。')
+    logLines.push('AI 重命名存在失败项目，将基于当前云盘状态继续生成 STRM。')
   }
 
   try {
@@ -10381,7 +10401,7 @@ const server = createServer(async (request, response) => {
 
       sendJson(response, 200, {
         log: runtimeLog?.log ?? task.lastLog ?? '',
-        status: runtimeLog?.status ?? task.status,
+        status: runtimeLog?.status ?? resolvePersistedTaskStatus(task),
         taskId: task.id,
         taskName: task.name,
         updatedAt: runtimeLog?.updatedAt ?? task.lastRunAt,

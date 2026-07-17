@@ -2,6 +2,19 @@ import path from 'node:path'
 
 const supportedNamingStyles = new Set(['zh-en', 'en-zh', 'zh', 'en'])
 
+export function resolveAiRenameJobStatus(progress = {}) {
+  const failed = Number(progress.failed ?? 0)
+  const ignored = Number(progress.ignored ?? 0)
+  const skipped = Number(progress.skipped ?? 0)
+  const succeeded = Number(progress.succeeded ?? 0)
+
+  if (failed > 0) {
+    return succeeded > 0 || skipped > 0 || ignored > 0 ? 'partial' : 'failed'
+  }
+
+  return 'completed'
+}
+
 export function normalizeNamingStyle(value) {
   const normalized = String(value ?? '')
     .trim()

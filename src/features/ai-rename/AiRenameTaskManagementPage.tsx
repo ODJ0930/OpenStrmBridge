@@ -88,7 +88,7 @@ const stageLabels: Record<AiRenameJob['stage'], string> = {
   cancelled: '已取消',
   executing: '逐项改名',
   failed: '失败',
-  finished: '已完成',
+  finished: '处理结束',
   moving: '整理目录',
   queued: '排队中',
   scanning: '扫描目录',

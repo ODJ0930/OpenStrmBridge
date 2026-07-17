@@ -250,4 +250,20 @@ describe('STRM stale-file cleanup integration', () => {
     const reloadedIndex = JSON.parse(await readFile(indexFile, 'utf8'))
     expect(reloadedIndex.some((entry) => entry.strmFile === externalStrmFile)).toBe(false)
   }, 20_000)
+
+  it('treats unchanged incremental STRM files as a successful run', async () => {
+    const run = await runTask()
+
+    expect(run.result).toMatchObject({
+      failed: 0,
+      failedDirectories: 0,
+      generated: 0,
+      ok: true,
+      partial: false,
+      skipped: 1,
+      status: 'succeeded',
+    })
+    expect(run.task.status).toBe('succeeded')
+    expect(run.task.lastLog).toContain('生成 0 个，跳过 1 个，失败 0 个')
+  }, 20_000)
 })

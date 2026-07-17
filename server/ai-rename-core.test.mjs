@@ -10,6 +10,7 @@ import {
   renderFolderName,
   renderMovieFileName,
   renderSidecarFileName,
+  resolveAiRenameJobStatus,
   sanitizeNameSegment,
 } from './ai-rename-core.mjs'
 
@@ -19,6 +20,26 @@ const rickAndMorty = {
   titleZh: '瑞克和莫蒂',
   year: 2013,
 }
+
+describe('AI rename job outcome', () => {
+  it('treats skipped-only work as completed instead of failed', () => {
+    expect(resolveAiRenameJobStatus({ failed: 0, ignored: 125, skipped: 6, succeeded: 0 })).toBe(
+      'completed',
+    )
+  })
+
+  it('distinguishes completed, partially failed and fully failed work', () => {
+    expect(resolveAiRenameJobStatus({ failed: 0, ignored: 8, skipped: 0, succeeded: 0 })).toBe(
+      'completed',
+    )
+    expect(resolveAiRenameJobStatus({ failed: 1, ignored: 8, skipped: 0, succeeded: 0 })).toBe(
+      'partial',
+    )
+    expect(resolveAiRenameJobStatus({ failed: 2, ignored: 0, skipped: 0, succeeded: 0 })).toBe(
+      'failed',
+    )
+  })
+})
 
 describe('AI rename deterministic naming', () => {
   it('renders bilingual series, season and episode names', () => {

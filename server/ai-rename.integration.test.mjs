@@ -590,6 +590,48 @@ describe('AI rename local-storage integration', () => {
         },
       }),
     )
+    const historicalJobTime = '2026-07-17T02:27:17.000Z'
+    await writeFile(
+      path.join(dataDirectory, 'ai-rename-tasks.json'),
+      JSON.stringify([
+        {
+          allowMove: false,
+          createdAt: historicalJobTime,
+          id: 'historical-skipped-task',
+          lastJob: {
+            allowMove: false,
+            createdAt: historicalJobTime,
+            currentPath: '',
+            finishedAt: historicalJobTime,
+            id: 'historical-skipped-job',
+            message: '处理完成：成功 0，跳过 6，失败 0',
+            path: libraryDirectory,
+            progress: {
+              analyzed: 131,
+              completedOperations: 131,
+              failed: 0,
+              ignored: 125,
+              scanned: 131,
+              skipped: 6,
+              succeeded: 0,
+              totalOperations: 131,
+            },
+            results: [],
+            stage: 'finished',
+            status: 'failed',
+            storageId: 'local-test',
+            useTmdb: false,
+          },
+          lastRunAt: historicalJobTime,
+          name: '历史跳过结果',
+          path: libraryDirectory,
+          status: 'failed',
+          storageId: 'local-test',
+          updatedAt: historicalJobTime,
+          useTmdb: false,
+        },
+      ]),
+    )
 
     const backendPort = await reservePort()
     backendBaseUrl = `http://127.0.0.1:${backendPort}`
@@ -615,6 +657,34 @@ describe('AI rename local-storage integration', () => {
     await close(openListServer)
     await close(webDavServer)
     await rm(tempDirectory, { force: true, recursive: true })
+  })
+
+  it('normalizes historical skipped-only results to completed instead of failed', async () => {
+    const headers = {
+      Origin: backendBaseUrl,
+      Referer: `${backendBaseUrl}/ai-rename-tasks`,
+    }
+    const tasks = await (await fetch(`${backendBaseUrl}/api/ai-rename/tasks`, { headers })).json()
+    expect(tasks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'historical-skipped-task',
+          lastJob: expect.objectContaining({ status: 'completed' }),
+          status: 'completed',
+        }),
+      ]),
+    )
+
+    const result = await (
+      await fetch(`${backendBaseUrl}/api/ai-rename/tasks/historical-skipped-task/result`, {
+        headers,
+      })
+    ).json()
+    expect(result).toMatchObject({
+      progress: { failed: 0, skipped: 6, succeeded: 0 },
+      stage: 'finished',
+      status: 'completed',
+    })
   })
 
   it('keeps credentials server-side and renames media recursively without touching adverts', async () => {
@@ -1135,7 +1205,7 @@ describe('AI rename local-storage integration', () => {
       ).json()
     }
 
-    expect(job.status, JSON.stringify(job, null, 2)).toBe('partial')
+    expect(job.status, JSON.stringify(job, null, 2)).toBe('completed')
     expect(job.taskId).toBe(taskId)
     expect(job.incrementalInventory).toMatchObject({
       baselineUpdated: true,
