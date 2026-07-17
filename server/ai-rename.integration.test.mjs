@@ -109,6 +109,7 @@ describe('AI rename local-storage integration', () => {
   let managedLibraryDirectory
   let movieLibraryDirectory
   let moveLibraryDirectory
+  let nestedLibraryDirectory
   let preStrmLibraryDirectory
   let strmOutputDirectory
   const openListTree = new Map()
@@ -116,6 +117,7 @@ describe('AI rename local-storage integration', () => {
   const backendOutput = []
   const aiRequestPayloads = []
   const inventoryRequestGroupCounts = []
+  const inventoryRequests = []
 
   beforeAll(async () => {
     tempDirectory = await mkdtemp(path.join(os.tmpdir(), 'openstrmbridge-ai-rename-'))
@@ -139,6 +141,19 @@ describe('AI rename local-storage integration', () => {
     await mkdir(seasonTwoDirectory, { recursive: true })
     await writeFile(path.join(seasonOneDirectory, 'Rick.and.Morty.S01E01.mkv'), 'season-1')
     await writeFile(path.join(seasonTwoDirectory, 'Rick.and.Morty.S02E01.mkv'), 'season-2')
+    nestedLibraryDirectory = path.join(tempDirectory, 'nested-library')
+    const nestedSeasonDirectory = path.join(
+      nestedLibraryDirectory,
+      '电视剧',
+      '黑镜',
+      'Black.Mirror.S03',
+    )
+    await mkdir(nestedSeasonDirectory, { recursive: true })
+    await writeFile(
+      path.join(nestedSeasonDirectory, 'Black.Mirror.S03E01.1080p.mkv'),
+      'black-mirror-season-3',
+    )
+    await mkdir(path.join(nestedLibraryDirectory, '电视剧', '空目录'), { recursive: true })
     managedLibraryDirectory = path.join(tempDirectory, 'managed-library')
     const managedSeasonDirectory = path.join(managedLibraryDirectory, 'Rick.and.Morty.S05.1080p')
     const managedUnknownDirectory = path.join(managedLibraryDirectory, 'Unknown.Show')
@@ -198,6 +213,7 @@ describe('AI rename local-storage integration', () => {
       const marker = '待识别媒体目录清单：'
       const inventory = JSON.parse(prompt.slice(prompt.indexOf(marker) + marker.length))
       inventoryRequestGroupCounts.push(inventory.length)
+      inventoryRequests.push(inventory)
       const groups = inventory.map((group) => {
         const entries = group.entries
 
@@ -207,6 +223,34 @@ describe('AI rename local-storage integration', () => {
             items: entries.map((entry) => ({ id: entry.id, role: 'ignore' })),
             mediaType: 'tv',
             series: null,
+          }
+        }
+
+        if (/Black\.Mirror/i.test(JSON.stringify(entries))) {
+          const seasonMatch = JSON.stringify(entries).match(/S(\d{1,2})(?:E|[\s._-]|")/i)
+          const season = seasonMatch ? Number.parseInt(seasonMatch[1], 10) : 3
+          const items = entries.map((entry) => {
+            if (entry.kind === 'folder') {
+              return { id: entry.id, role: 'season-folder', season }
+            }
+
+            if (/\.(?:mp4|mkv)$/i.test(entry.name)) {
+              return { episodes: [1], id: entry.id, role: 'episode', season }
+            }
+
+            return { id: entry.id, role: 'ignore' }
+          })
+
+          return {
+            groupId: group.groupId,
+            items,
+            mediaType: 'tv',
+            series: {
+              season,
+              titleOriginal: 'Black Mirror',
+              titleZh: '黑镜',
+              year: 2011,
+            },
           }
         }
 
@@ -251,12 +295,15 @@ describe('AI rename local-storage integration', () => {
         const seasonMatch = JSON.stringify(entries).match(/S(\d{1,2})E/i)
         const season = seasonMatch ? Number.parseInt(seasonMatch[1], 10) : 6
         const items = entries.map((entry) => {
+          const entrySeasonMatch = entry.name.match(/S(\d{1,2})(?:E|[\s._-]|$)/i)
+          const entrySeason = entrySeasonMatch ? Number.parseInt(entrySeasonMatch[1], 10) : season
+
           if (entry.kind === 'folder') {
-            return { id: entry.id, role: 'season-folder', season }
+            return { id: entry.id, role: 'season-folder', season: entrySeason }
           }
 
           if (/\.(?:mp4|mkv)$/i.test(entry.name)) {
-            return { episodes: [1], id: entry.id, role: 'episode', season }
+            return { episodes: [1], id: entry.id, role: 'episode', season: entrySeason }
           }
 
           return { id: entry.id, role: 'ignore' }
@@ -282,8 +329,9 @@ describe('AI rename local-storage integration', () => {
     aiBaseUrl = `http://127.0.0.1:${aiPort}/v1`
 
     openListTree.set('/tv', { kind: 'folder' })
-    openListTree.set('/tv/Rick.and.Morty.S03.1080p', { kind: 'folder' })
-    openListTree.set('/tv/Rick.and.Morty.S03.1080p/Rick.and.Morty.S03E01.mkv', {
+    openListTree.set('/tv/黑镜', { kind: 'folder' })
+    openListTree.set('/tv/黑镜/Black.Mirror.S03', { kind: 'folder' })
+    openListTree.set('/tv/黑镜/Black.Mirror.S03/Black.Mirror.S03E01.mkv', {
       kind: 'file',
     })
     openListServer = createServer(async (request, response) => {
@@ -354,8 +402,9 @@ describe('AI rename local-storage integration', () => {
     openListBaseUrl = `http://127.0.0.1:${openListPort}`
 
     webDavTree.set('/tv', { kind: 'folder' })
-    webDavTree.set('/tv/Rick.and.Morty.S04.1080p', { kind: 'folder' })
-    webDavTree.set('/tv/Rick.and.Morty.S04.1080p/Rick.and.Morty.S04E01.mkv', {
+    webDavTree.set('/tv/黑镜', { kind: 'folder' })
+    webDavTree.set('/tv/黑镜/Black.Mirror.S04', { kind: 'folder' })
+    webDavTree.set('/tv/黑镜/Black.Mirror.S04/Black.Mirror.S04E01.mkv', {
       kind: 'file',
     })
     webDavServer = createServer(async (request, response) => {
@@ -441,6 +490,15 @@ describe('AI rename local-storage integration', () => {
           local: { path: moveLibraryDirectory },
           name: '本地移动测试',
           rootPath: moveLibraryDirectory,
+          status: 'connected',
+        },
+        {
+          accessMethod: 'local',
+          endpoint: nestedLibraryDirectory,
+          id: 'local-nested-test',
+          local: { path: nestedLibraryDirectory },
+          name: '本地深层目录测试',
+          rootPath: nestedLibraryDirectory,
           status: 'connected',
         },
         {
@@ -771,27 +829,102 @@ describe('AI rename local-storage integration', () => {
     expect(await readdir(path.join(showDirectory, 'Season 02'))).toContain(
       '瑞克和莫蒂 (Rick and Morty) - S02E01.mkv',
     )
-    expect(inventoryRequestGroupCounts.slice(inventoryRequestCountBefore)).toEqual([2])
+    expect(inventoryRequestGroupCounts.slice(inventoryRequestCountBefore)).toEqual([1])
     const taskAiRequests = aiRequestPayloads.slice(aiRequestCountBefore)
     expect(taskAiRequests).toHaveLength(1)
     expect(String(taskAiRequests[0].messages?.at(-1)?.content)).toContain('Emby 标准名称')
-    expect(job.progress).toMatchObject({ processedGroups: 2, totalGroups: 2 })
+    expect(job.progress).toMatchObject({ processedGroups: 1, totalGroups: 1 })
     expect(job.results).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           action: 'directory',
-          message: '开始执行 AI 建议（1/2）',
+          message: expect.stringContaining('开始执行 AI 建议（1/1），逻辑组根：'),
           status: 'info',
         }),
         expect.objectContaining({
           action: 'inventory',
-          message: 'AI 已一次性返回 2/2 个目录的修改建议，开始按顺序执行',
+          message: 'AI 已一次性返回 1/1 个逻辑媒体组的修改建议，开始按顺序执行',
           status: 'info',
         }),
         expect.objectContaining({
           action: 'directory',
-          message: expect.stringContaining('目录处理完成（1/2）'),
+          message: expect.stringContaining('逻辑媒体组处理完成（1/1）'),
           status: 'info',
+        }),
+      ]),
+    )
+  }, 20_000)
+
+  it('discovers a deep series container and preserves its category hierarchy', async () => {
+    const inventoryRequestCountBefore = inventoryRequests.length
+    const headers = {
+      'Content-Type': 'application/json',
+      Origin: backendBaseUrl,
+      Referer: `${backendBaseUrl}/ai-rename-tasks`,
+    }
+    const createResponse = await fetch(`${backendBaseUrl}/api/storage/ai-rename/jobs`, {
+      body: JSON.stringify({
+        allowMove: true,
+        path: nestedLibraryDirectory,
+        recursive: true,
+        storageId: 'local-nested-test',
+        useTmdb: false,
+      }),
+      headers,
+      method: 'POST',
+    })
+    expect(createResponse.status).toBe(202)
+    let job = await createResponse.json()
+
+    for (
+      let attempt = 0;
+      attempt < 100 && !['completed', 'partial', 'failed'].includes(job.status);
+      attempt += 1
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      job = await (
+        await fetch(`${backendBaseUrl}/api/storage/ai-rename/jobs/${encodeURIComponent(job.id)}`, {
+          headers,
+        })
+      ).json()
+    }
+
+    expect(job.status, JSON.stringify(job, null, 2)).toBe('completed')
+    expect(job.progress).toMatchObject({ processedGroups: 1, totalGroups: 1 })
+    const canonicalSeriesDirectory = path.join(
+      nestedLibraryDirectory,
+      '电视剧',
+      '黑镜 (Black Mirror) (2011)',
+    )
+    expect(await readdir(nestedLibraryDirectory)).toEqual(['电视剧'])
+    expect(await readdir(canonicalSeriesDirectory)).toEqual(['Season 03'])
+    expect(await readdir(path.join(canonicalSeriesDirectory, 'Season 03'))).toEqual([
+      '黑镜 (Black Mirror) - S03E01.mkv',
+    ])
+    const submittedInventory = inventoryRequests[inventoryRequestCountBefore]
+    expect(submittedInventory).toHaveLength(1)
+    expect(submittedInventory[0]).toMatchObject({
+      directoryName: '黑镜',
+      directoryPath: '电视剧/黑镜',
+      layoutHint: 'series-container',
+      mediaHint: 'tv',
+    })
+    expect(submittedInventory[0].entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ depth: 1, inferredRole: 'series-folder', name: '黑镜' }),
+        expect.objectContaining({
+          depth: 2,
+          inferredRole: 'season-folder',
+          inferredSeason: 3,
+          name: 'Black.Mirror.S03',
+        }),
+      ]),
+    )
+    expect(job.results).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          action: 'directory',
+          oldPath: path.join(nestedLibraryDirectory, '电视剧', '黑镜'),
         }),
       ]),
     )
@@ -1030,10 +1163,10 @@ describe('AI rename local-storage integration', () => {
     expect(changedRunResponse.status).toBe(200)
     const changedRunResult = await changedRunResponse.json()
     expect(changedRunResult.result).toMatchObject({
-      aiRenameInventoryGroups: 2,
+      aiRenameInventoryGroups: 1,
       aiRenameStatus: 'completed',
       aiRenameSubmittedGroups: 1,
-      aiRenameUnchangedGroups: 1,
+      aiRenameUnchangedGroups: 0,
       generated: 1,
       skipped: 1,
     })
@@ -1074,11 +1207,9 @@ describe('AI rename local-storage integration', () => {
     }
 
     expect(job.status, JSON.stringify(job, null, 2)).toBe('completed')
-    expect(openListTree.has('/tv/瑞克和莫蒂 (Rick and Morty) (2013) - Season 03')).toBe(true)
+    expect(openListTree.has('/tv/黑镜 (Black Mirror) (2011)/Season 03')).toBe(true)
     expect(
-      openListTree.has(
-        '/tv/瑞克和莫蒂 (Rick and Morty) (2013) - Season 03/瑞克和莫蒂 (Rick and Morty) - S03E01.mkv',
-      ),
+      openListTree.has('/tv/黑镜 (Black Mirror) (2011)/Season 03/黑镜 (Black Mirror) - S03E01.mkv'),
     ).toBe(true)
   }, 20_000)
 
@@ -1115,11 +1246,9 @@ describe('AI rename local-storage integration', () => {
     }
 
     expect(job.status, JSON.stringify(job, null, 2)).toBe('completed')
-    expect(webDavTree.has('/tv/瑞克和莫蒂 (Rick and Morty) (2013) - Season 04')).toBe(true)
+    expect(webDavTree.has('/tv/黑镜 (Black Mirror) (2011)/Season 04')).toBe(true)
     expect(
-      webDavTree.has(
-        '/tv/瑞克和莫蒂 (Rick and Morty) (2013) - Season 04/瑞克和莫蒂 (Rick and Morty) - S04E01.mkv',
-      ),
+      webDavTree.has('/tv/黑镜 (Black Mirror) (2011)/Season 04/黑镜 (Black Mirror) - S04E01.mkv'),
     ).toBe(true)
   }, 20_000)
 })

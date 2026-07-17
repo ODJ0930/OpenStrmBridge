@@ -645,7 +645,7 @@ export function TaskManagementPage() {
       setLogStatus(response.task.status)
       const aiRenameSummary =
         response.result.aiRenameStatus && response.result.aiRenameStatus !== 'skipped'
-          ? `，AI 提交 ${response.result.aiRenameSubmittedGroups ?? 0} 个目录，增量跳过 ${response.result.aiRenameUnchangedGroups ?? 0} 个目录`
+          ? `，AI 提交 ${response.result.aiRenameSubmittedGroups ?? 0} 个媒体组，增量跳过 ${response.result.aiRenameUnchangedGroups ?? 0} 个媒体组`
           : ''
 
       if (response.result.status === 'partial' || response.result.partial) {

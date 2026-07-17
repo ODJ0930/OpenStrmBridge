@@ -59,7 +59,7 @@ function createMockJob(task: AiRenameManagedTask): AiRenameJob {
       {
         action: 'inventory',
         at: now,
-        message: '已汇总 1 个视频目录、2 个条目，AI 已一次性返回修改建议',
+        message: '已汇总 1 个逻辑媒体组、2 个条目，AI 已一次性返回修改建议',
         oldPath: task.path,
         status: 'info',
       },

@@ -3086,6 +3086,7 @@ async function scanAiRenameTree(storage, requestedPath, job, extensionSets) {
         id,
         kind: entry.kind,
         name: entry.name,
+        parentPath: current.path,
         path: entry.path,
         relativePath: getRelativeStoragePath(storage, operationRoot, entry.path),
         size: entry.kind === 'file' ? String(entry.size ?? '') : '',
@@ -3113,26 +3114,36 @@ function createAiRenameInventoryPrompt(
   additionalInstructions,
   promptTemplate,
 ) {
-  const inventory = groupRecords.map(({ groupEntries, groupId }) => ({
-    directoryName: getTopEntryForPlan(groupEntries)?.name ?? '当前目录文件',
-    directoryPath: getTopEntryForPlan(groupEntries)?.relativePath ?? '.',
-    entries: groupEntries.map((entry) => ({
-      depth: entry.depth,
-      eligible: entry.eligible,
-      id: entry.id,
-      kind: entry.kind,
-      name: entry.name,
-      relativePath: entry.relativePath,
-    })),
-    groupId,
-    mediaHint: inferAiRenameMediaHint(
-      getTopEntryForPlan(groupEntries)?.path ?? groupEntries[0]?.path,
-    ),
-  }))
+  const inventory = groupRecords.map(
+    ({ directoryPath, groupEntries, groupId, groupName, inferredSeasonByEntryId, layoutHint }) => ({
+      directoryName: getTopEntryForPlan(groupEntries)?.name ?? groupName ?? '当前目录文件',
+      directoryPath: getTopEntryForPlan(groupEntries)?.relativePath ?? directoryPath ?? '.',
+      entries: groupEntries.map((entry) => ({
+        depth: entry.depth,
+        eligible: entry.eligible,
+        id: entry.id,
+        inferredRole:
+          entry.depth === 1 && layoutHint === 'series-container'
+            ? 'series-folder'
+            : inferredSeasonByEntryId?.[entry.id] !== undefined
+              ? 'season-folder'
+              : undefined,
+        inferredSeason: inferredSeasonByEntryId?.[entry.id],
+        kind: entry.kind,
+        name: entry.name,
+        relativePath: entry.relativePath,
+      })),
+      groupId,
+      layoutHint,
+      mediaHint: inferAiRenameMediaHint(
+        getTopEntryForPlan(groupEntries)?.path ?? groupEntries[0]?.path,
+      ),
+    }),
+  )
 
   return [
     String(promptTemplate || defaultAiRenamePromptTemplate).trim(),
-    '你是电影与电视剧媒体库命名分析器。下方是一次性汇总的全部视频目录清单，需要在一次回复中完成所有目录的识别。只输出一个 JSON 对象，不要输出 Markdown。',
+    '你是电影与电视剧媒体库命名分析器。下方是一次性汇总的全部逻辑媒体组清单，需要在一次回复中完成所有媒体组的识别。只输出一个 JSON 对象，不要输出 Markdown。',
     '不要返回路径或 newName；后端会根据结构化字段生成安全名称。',
     '每组必须返回 mediaType，值只能是 tv、movie、movie-collection。电视剧使用 series；电影的 series 必须为 null，片名和年份写在每个 movie item 中。',
     '输出结构：{"groups":[{"groupId":"输入的 groupId","mediaType":"tv","series":{"titleZh":"简体中文正式名","titleOriginal":"官方或通用英文名","year":2013,"season":1},"items":[...]}]}。',
@@ -3145,6 +3156,7 @@ function createAiRenameInventoryPrompt(
     'sidecar 项必须用 sidecarFor 指向对应 episode 或 movie id；字幕可提供 language、forced、hearingImpaired。',
     '每个 eligible 文件或文件夹都应返回一项；广告图片、网站宣传图、无法可靠识别项使用 ignore。',
     '顶层单季目录标为 season-folder；包含多个季目录的剧集容器标为 series-folder；子季目录标为 season-folder。',
+    'layoutHint 是后端根据完整目录树得到的结构提示：series-container 表示剧集容器，season-folder 表示单季目录，season-folders 表示同剧的多个并列季目录，series-flat 表示平铺剧集，movie-folder 表示电影目录。必须优先遵守 inferredRole 和 inferredSeason。',
     '单部电影目录标为 movie-folder；同一目录包含多部独立电影或续集时使用 movie-collection，容器标为 collection-folder，每个视频分别标为 movie。',
     '输入中的 mediaHint 来自用户选择的媒体库路径：movie 表示电影库，禁止返回 tv；tv 表示电视剧库。unknown 才允许完全自行判断。',
     '数字续集、年份、分辨率或文件排列序号本身不是电视剧集号。尤其是速度与激情、哈利波特等电影系列不得输出 S01E01；即使文件曾被错误命名为 S01E01，也要结合合集目录名按电影续集识别。',
@@ -3188,28 +3200,470 @@ function inferAiRenameMediaHint(storagePath) {
   return 'unknown'
 }
 
-function createAiRenameGroupRecords(entries, extensionSets) {
-  const groupedEntries = new Map()
+function parseSmallChineseNumber(value) {
+  const normalized = String(value ?? '').trim()
+  const directNumber = Number.parseInt(normalized, 10)
 
-  for (const entry of entries) {
-    const group = groupedEntries.get(entry.topId) ?? []
-    group.push(entry)
-    groupedEntries.set(entry.topId, group)
+  if (Number.isFinite(directNumber)) {
+    return directNumber
   }
 
-  return [...groupedEntries.values()]
-    .filter((group) =>
-      group.some((entry) => entry.kind === 'file' && isMediaFileName(entry.name, extensionSets)),
-    )
-    .map((groupEntries) => ({
-      fingerprint: createAiRenameGroupFingerprint(groupEntries),
-      groupEntries,
-      groupId: String(groupEntries[0]?.topId ?? ''),
-      groupPath: getTopEntryForPlan(groupEntries)?.path ?? groupEntries[0]?.path ?? '',
-    }))
+  const digits = { 一: 1, 七: 7, 三: 3, 九: 9, 二: 2, 五: 5, 八: 8, 六: 6, 四: 4, 零: 0 }
+
+  if (normalized === '十') {
+    return 10
+  }
+
+  const tenIndex = normalized.indexOf('十')
+
+  if (tenIndex >= 0) {
+    const tens = tenIndex === 0 ? 1 : digits[normalized[tenIndex - 1]]
+    const units = tenIndex === normalized.length - 1 ? 0 : digits[normalized[tenIndex + 1]]
+    return Number.isFinite(tens) && Number.isFinite(units) ? tens * 10 + units : undefined
+  }
+
+  return normalized.length === 1 ? digits[normalized] : undefined
 }
 
-function createAiRenameGroupFingerprint(groupEntries) {
+function getAiRenameSeasonFromName(name) {
+  const value = String(name ?? '').normalize('NFKC')
+
+  if (/(?:^|[\s._\-[(（])(?:specials?|特别篇|特别季|特典)(?:$|[\s._\-\])）])/i.test(value)) {
+    return 0
+  }
+
+  const seasonToken = value.match(
+    /(?:^|[\s._\-[(（])(?:season[\s._-]*|s)(\d{1,3})(?=$|[\s._\-\])）]|e\d)/i,
+  )
+
+  if (seasonToken) {
+    return Number.parseInt(seasonToken[1], 10)
+  }
+
+  const chineseSeason = value.match(/第\s*([零一二三四五六七八九十\d]{1,3})\s*季/)
+  return chineseSeason ? parseSmallChineseNumber(chineseSeason[1]) : undefined
+}
+
+function getAiRenameEpisodeSeasonFromName(name) {
+  const value = String(name ?? '').normalize('NFKC')
+  const episodeToken = value.match(
+    /(?:^|[\s._\-[(（])s(\d{1,3})[\s._-]*e\d{1,4}(?=$|[\s._\-\])）]|e\d)/i,
+  )
+
+  return episodeToken ? Number.parseInt(episodeToken[1], 10) : undefined
+}
+
+function isAiRenameTechnicalWrapperName(name) {
+  const value = String(name ?? '')
+    .normalize('NFKC')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s._-]+/g, '')
+
+  return /^(?:(?:480|576|720|1080|1440|2160|4320)[pi]|[248]k|uhd|fhd|hd|hdr\d*|dolbyvision|dv|sdr|bluray|bdrip|bdremux|remux|webdl|webrip|web|hdtv|x26[45]|h26[45]|hevc|av1|10bit|8bit|cd\d+|disc\d+|disk\d+|part\d+|pt\d+)$/.test(
+    value,
+  )
+}
+
+function isAiRenameCategoryDirectoryName(name) {
+  const value = String(name ?? '')
+    .normalize('NFKC')
+    .trim()
+    .toLowerCase()
+  const compact = value.replace(/[\s._-]+/g, '')
+
+  return (
+    /^(?:电视剧|电视节目|剧集|美剧|英剧|韩剧|日剧|国产剧|海外剧|动漫|动画|综艺|纪录片|电影|影片|华语电影|欧美电影|日韩电影|tv|television|series|shows?|movies?|films?|cinema|anime|documentar(?:y|ies))$/.test(
+      compact,
+    ) ||
+    /^(?:国产|华语|欧美|日韩|韩国|日本|美国|英国|大陆|港台|海外|完结|连载|更新中|待整理|未整理|已整理|合集|收藏|archive|incoming|unsorted|completed)$/.test(
+      compact,
+    ) ||
+    /^(?:19|20)\d{2}(?:年)?$/.test(compact) ||
+    /^[a-z0-9]$/.test(compact) ||
+    isAiRenameTechnicalWrapperName(name)
+  )
+}
+
+function stripAiRenameSeasonDescriptor(name) {
+  return normalizeComparableTitle(
+    String(name ?? '')
+      .normalize('NFKC')
+      .replace(/(?:^|[\s._\-[(（])(?:season[\s._-]*|s)\d{1,3}(?=$|[\s._\-\])）]|e\d)/gi, ' ')
+      .replace(/第\s*[零一二三四五六七八九十\d]{1,3}\s*季/g, ' ')
+      .replace(/(?:specials?|特别篇|特别季|特典)/gi, ' ')
+      .replace(
+        /(?:480|576|720|1080|1440|2160|4320)[pi]|[248]k|uhd|fhd|hdr\d*|bluray|remux|web-?dl|webrip|x26[45]|h26[45]|hevc|av1|10bit/gi,
+        ' ',
+      ),
+  )
+}
+
+function getAiRenameEpisodeTitleKey(files) {
+  for (const file of files) {
+    const prefix = String(file.name ?? '').split(/s\d{1,3}[\s._-]*e\d{1,4}/i)[0]
+    const key = stripAiRenameSeasonDescriptor(prefix)
+
+    if (key) {
+      return key
+    }
+  }
+
+  return ''
+}
+
+function areAiRenameSeasonKeysCompatible(firstKey, secondKey) {
+  const first = String(firstKey ?? '')
+  const second = String(secondKey ?? '')
+
+  if (!first || !second) {
+    return true
+  }
+
+  return (
+    first === second ||
+    (first.length >= 4 && second.includes(first)) ||
+    (second.length >= 4 && first.includes(second))
+  )
+}
+
+function isStoragePathInsideOrEqual(storage, candidatePath, rootPath) {
+  const relativePath = getRelativeStoragePath(storage, rootPath, candidatePath)
+
+  if (!relativePath || relativePath === '.') {
+    return true
+  }
+
+  return (
+    relativePath !== '..' &&
+    !relativePath.startsWith('../') &&
+    !relativePath.startsWith('..\\') &&
+    !(storage.accessMethod === 'local'
+      ? path.isAbsolute(relativePath)
+      : path.posix.isAbsolute(relativePath))
+  )
+}
+
+function createAiRenameGroupRecords(entries, extensionSets, storage, operationRoot) {
+  const folderByPath = new Map(
+    entries
+      .filter((entry) => entry.kind === 'folder')
+      .map((entry) => [getStoragePathStateKey(storage, entry.path), entry]),
+  )
+  const directMediaByParent = new Map()
+
+  for (const entry of entries) {
+    if (entry.kind !== 'file' || !isMediaFileName(entry.name, extensionSets)) {
+      continue
+    }
+
+    const parentPath = entry.parentPath || getStorageParentPath(storage, entry.path)
+    const parentKey = getStoragePathStateKey(storage, parentPath)
+    const files = directMediaByParent.get(parentKey) ?? []
+    files.push(entry)
+    directMediaByParent.set(parentKey, files)
+  }
+
+  const getFolder = (candidatePath) =>
+    folderByPath.get(getStoragePathStateKey(storage, candidatePath))
+  const getParentFolder = (folder) => {
+    if (!folder || storagePathsEqual(storage, folder.path, operationRoot)) {
+      return undefined
+    }
+
+    return getFolder(folder.parentPath || getStorageParentPath(storage, folder.path))
+  }
+  const leafRecords = []
+
+  for (const [parentKey, mediaFiles] of directMediaByParent.entries()) {
+    const leafFolder = folderByPath.get(parentKey)
+    const leafPath = leafFolder?.path ?? operationRoot
+    let namedSeasonFolder
+    let cursor = leafFolder
+
+    while (cursor && !storagePathsEqual(storage, cursor.path, operationRoot)) {
+      if (getAiRenameSeasonFromName(cursor.name) !== undefined) {
+        namedSeasonFolder = cursor
+        break
+      }
+
+      if (isAiRenameTechnicalWrapperName(cursor.name)) {
+        cursor = getParentFolder(cursor)
+        continue
+      }
+
+      if (isAiRenameCategoryDirectoryName(cursor.name)) {
+        break
+      }
+
+      cursor = getParentFolder(cursor)
+    }
+
+    const episodeSeason = mediaFiles
+      .map((entry) => getAiRenameEpisodeSeasonFromName(entry.name))
+      .find((season) => season !== undefined)
+    const technicalSeasonFolder =
+      !namedSeasonFolder &&
+      episodeSeason !== undefined &&
+      isAiRenameTechnicalWrapperName(leafFolder?.name)
+        ? leafFolder
+        : undefined
+    const seasonFolder = namedSeasonFolder || technicalSeasonFolder
+    let placementParentPath =
+      seasonFolder?.parentPath || getStorageParentPath(storage, seasonFolder?.path || leafPath)
+    let candidate = seasonFolder ? getFolder(placementParentPath) : undefined
+
+    while (candidate && isAiRenameTechnicalWrapperName(candidate.name)) {
+      placementParentPath = candidate.parentPath || getStorageParentPath(storage, candidate.path)
+      candidate = getFolder(placementParentPath)
+    }
+
+    const candidateIsSeriesContainer = Boolean(
+      candidate &&
+      !storagePathsEqual(storage, candidate.path, operationRoot) &&
+      !isAiRenameCategoryDirectoryName(candidate.name),
+    )
+    const seasonKey = seasonFolder
+      ? stripAiRenameSeasonDescriptor(seasonFolder.name) || getAiRenameEpisodeTitleKey(mediaFiles)
+      : ''
+
+    leafRecords.push({
+      candidate: candidateIsSeriesContainer ? candidate : undefined,
+      episodeSeason,
+      leafFolder,
+      leafPath,
+      mediaFiles,
+      placementParentPath,
+      seasonFolder,
+      seasonKey,
+    })
+  }
+
+  const leavesByCandidate = new Map()
+
+  for (const leaf of leafRecords) {
+    if (!leaf.candidate) {
+      continue
+    }
+
+    const key = getStoragePathStateKey(storage, leaf.candidate.path)
+    const candidateLeaves = leavesByCandidate.get(key) ?? []
+    candidateLeaves.push(leaf)
+    leavesByCandidate.set(key, candidateLeaves)
+  }
+
+  const compatibleCandidateKeys = new Set(
+    [...leavesByCandidate.entries()]
+      .filter(([, leaves]) =>
+        leaves.every((leaf, index) =>
+          leaves
+            .slice(index + 1)
+            .every((candidate) =>
+              areAiRenameSeasonKeysCompatible(leaf.seasonKey, candidate.seasonKey),
+            ),
+        ),
+      )
+      .map(([key]) => key),
+  )
+  const siblingSeasonCandidates = leafRecords.filter(
+    (leaf) => !leaf.candidate && leaf.seasonFolder && leaf.seasonKey,
+  )
+  const siblingSeasonGroupByLeaf = new Map()
+  const claimedSiblingLeaves = new Set()
+  let siblingSeasonGroupCounter = 0
+
+  for (const leaf of siblingSeasonCandidates) {
+    if (claimedSiblingLeaves.has(leaf)) {
+      continue
+    }
+
+    const siblings = siblingSeasonCandidates.filter(
+      (candidate) =>
+        !claimedSiblingLeaves.has(candidate) &&
+        storagePathsEqual(storage, candidate.placementParentPath, leaf.placementParentPath) &&
+        areAiRenameSeasonKeysCompatible(candidate.seasonKey, leaf.seasonKey),
+    )
+
+    if (siblings.length > 1) {
+      siblingSeasonGroupCounter += 1
+      const groupKey = `siblings-${siblingSeasonGroupCounter}`
+
+      for (const sibling of siblings) {
+        claimedSiblingLeaves.add(sibling)
+        siblingSeasonGroupByLeaf.set(sibling, groupKey)
+      }
+    }
+  }
+
+  const pendingGroups = []
+
+  for (const leaf of leafRecords) {
+    const candidateKey = leaf.candidate ? getStoragePathStateKey(storage, leaf.candidate.path) : ''
+    const useSeriesContainer = candidateKey && compatibleCandidateKeys.has(candidateKey)
+    const siblingSeasonKey = siblingSeasonGroupByLeaf.get(leaf) ?? ''
+    const useSiblingSeasons = Boolean(siblingSeasonKey)
+    const groupRoot = useSiblingSeasons
+      ? undefined
+      : useSeriesContainer
+        ? leaf.candidate
+        : leaf.seasonFolder || leaf.leafFolder
+    const groupPath = useSiblingSeasons
+      ? leaf.placementParentPath
+      : groupRoot?.path || leaf.leafPath
+    const rootIsCategory = groupRoot ? isAiRenameCategoryDirectoryName(groupRoot.name) : true
+    const entryRootPaths = useSiblingSeasons
+      ? [leaf.seasonFolder.path]
+      : groupRoot && !rootIsCategory
+        ? [groupRoot.path]
+        : []
+    const includeRootFolder = entryRootPaths.length > 0
+    const mediaHint = inferAiRenameMediaHint(groupPath)
+    const layoutHint = useSeriesContainer
+      ? 'series-container'
+      : useSiblingSeasons
+        ? 'season-folders'
+        : leaf.seasonFolder
+          ? 'season-folder'
+          : mediaHint === 'movie'
+            ? 'movie-folder'
+            : mediaHint === 'tv'
+              ? 'series-flat'
+              : 'media-folder'
+    const groupParentPath = useSeriesContainer
+      ? leaf.candidate.parentPath || getStorageParentPath(storage, leaf.candidate.path)
+      : leaf.seasonFolder
+        ? leaf.placementParentPath
+        : includeRootFolder
+          ? groupRoot.parentPath || getStorageParentPath(storage, groupRoot.path)
+          : groupPath
+
+    pendingGroups.push({
+      entryRootPaths,
+      groupParentPath,
+      groupPath,
+      groupRoot,
+      includeRootFolder,
+      layoutHint,
+      mergeKey: useSiblingSeasons
+        ? `season-folders:${siblingSeasonKey}`
+        : `root:${getStoragePathStateKey(storage, groupPath)}:${includeRootFolder}`,
+      seasonFolders: leaf.seasonFolder
+        ? [
+            {
+              entry: leaf.seasonFolder,
+              season: leaf.episodeSeason ?? getAiRenameSeasonFromName(leaf.seasonFolder.name),
+            },
+          ]
+        : [],
+    })
+  }
+
+  const mergedGroups = new Map()
+
+  for (const group of pendingGroups) {
+    const existing = mergedGroups.get(group.mergeKey)
+
+    if (existing) {
+      existing.entryRootPaths.push(...group.entryRootPaths)
+      existing.seasonFolders.push(...group.seasonFolders)
+    } else {
+      mergedGroups.set(group.mergeKey, { ...group })
+    }
+  }
+
+  const finalGroups = [...mergedGroups.values()]
+  const ownedRootPaths = finalGroups.flatMap((group) =>
+    group.entryRootPaths.map((rootPath) => ({ group, rootPath })),
+  )
+
+  return finalGroups
+    .map((group, index) => {
+      group.entryRootPaths = [
+        ...new Map(
+          group.entryRootPaths.map((rootPath) => [
+            getStoragePathStateKey(storage, rootPath),
+            rootPath,
+          ]),
+        ).values(),
+      ]
+      const groupEntries = entries
+        .filter((entry) => {
+          if (group.entryRootPaths.length === 0) {
+            return storagePathsEqual(
+              storage,
+              entry.parentPath || getStorageParentPath(storage, entry.path),
+              group.groupPath,
+            )
+          }
+
+          if (
+            !group.entryRootPaths.some((rootPath) =>
+              isStoragePathInsideOrEqual(storage, entry.path, rootPath),
+            )
+          ) {
+            return false
+          }
+
+          return !ownedRootPaths.some(
+            ({ group: otherGroup, rootPath }) =>
+              otherGroup !== group && isStoragePathInsideOrEqual(storage, entry.path, rootPath),
+          )
+        })
+        .map((entry) => {
+          const owningRootPath = group.entryRootPaths.find((rootPath) =>
+            isStoragePathInsideOrEqual(storage, entry.path, rootPath),
+          )
+          const owningRoot = owningRootPath
+            ? folderByPath.get(getStoragePathStateKey(storage, owningRootPath))
+            : undefined
+
+          return {
+            ...entry,
+            depth: owningRoot ? entry.depth - owningRoot.depth + 1 : 1,
+            groupRelativePath: getRelativeStoragePath(storage, group.groupPath, entry.path),
+            topId: `group-${index + 1}`,
+          }
+        })
+      const inferredSeasonByEntryId = Object.fromEntries(
+        [
+          ...new Map(
+            group.seasonFolders.map((seasonFolder) => [seasonFolder.entry.id, seasonFolder]),
+          ).values(),
+        ]
+          .filter((seasonFolder) =>
+            groupEntries.some((candidate) => candidate.id === seasonFolder.entry.id),
+          )
+          .map((seasonFolder) => [seasonFolder.entry.id, seasonFolder.season]),
+      )
+      const groupRootPaths =
+        group.entryRootPaths.length > 0 ? group.entryRootPaths : [group.groupPath]
+      const displayGroupPath =
+        group.layoutHint === 'season-folders' ? groupRootPaths[0] : group.groupPath
+      const record = {
+        directoryPath: getRelativeStoragePath(storage, operationRoot, displayGroupPath) || '.',
+        groupEntries,
+        groupId: `group-${index + 1}`,
+        groupName: getStoragePathName(storage, displayGroupPath) || '当前目录文件',
+        groupParentPath: normalizeStoragePath(storage, group.groupParentPath || operationRoot),
+        groupPath: displayGroupPath,
+        groupRootPaths,
+        inferredSeasonByEntryId,
+        layoutHint: group.layoutHint,
+      }
+
+      return {
+        ...record,
+        fingerprint: createAiRenameGroupFingerprint(groupEntries, record),
+      }
+    })
+    .filter((record) =>
+      record.groupEntries.some(
+        (entry) => entry.kind === 'file' && isMediaFileName(entry.name, extensionSets),
+      ),
+    )
+}
+
+function createAiRenameGroupFingerprint(groupEntries, groupMetadata = {}) {
   const inventory = groupEntries
     .map((entry) => ({
       eligible: entry.eligible === true,
@@ -3227,7 +3681,16 @@ function createAiRenameGroupFingerprint(groupEntries) {
       )
     })
 
-  return createHash('sha256').update(JSON.stringify(inventory)).digest('hex')
+  return createHash('sha256')
+    .update(
+      JSON.stringify({
+        groupPath: String(groupMetadata.groupPath ?? '').replaceAll('\\', '/'),
+        inventory,
+        layoutHint: groupMetadata.layoutHint ?? '',
+        version: 3,
+      }),
+    )
+    .digest('hex')
 }
 
 function createAiRenameConfigurationFingerprint(aiSettings, taskOptions = {}) {
@@ -3244,7 +3707,7 @@ function createAiRenameConfigurationFingerprint(aiSettings, taskOptions = {}) {
         tmdbEnabled: aiSettings.tmdbEnabled && Boolean(aiSettings.tmdbToken),
         tmdbLanguage: aiSettings.tmdbLanguage,
         taskOptions,
-        version: 2,
+        version: 3,
       }),
     )
     .digest('hex')
@@ -3426,7 +3889,45 @@ function getTopEntryForPlan(entries) {
   return entries.find((entry) => entry.depth === 1 && entry.kind === 'folder')
 }
 
-function buildAiRenameGroupPlan(groupEntries, classification, extensionSets, operationRoot) {
+function applyAiRenameStructuralHints(classification, groupRecord) {
+  if (classification.mediaType !== 'tv') {
+    return classification
+  }
+
+  const itemById = new Map(classification.items.map((item) => [item.id, item]))
+  const topEntry = getTopEntryForPlan(groupRecord.groupEntries)
+  const ensureItem = (entryId) => {
+    const existing = itemById.get(entryId)
+
+    if (existing) {
+      return existing
+    }
+
+    const item = { id: entryId, role: 'ignore' }
+    classification.items.push(item)
+    itemById.set(entryId, item)
+    return item
+  }
+
+  if (topEntry && ['series-container', 'series-flat'].includes(groupRecord.layoutHint)) {
+    ensureItem(topEntry.id).role = 'series-folder'
+  } else if (topEntry && groupRecord.layoutHint === 'season-folder') {
+    const item = ensureItem(topEntry.id)
+    item.role = 'season-folder'
+    item.season = groupRecord.inferredSeasonByEntryId[topEntry.id] ?? item.season
+  }
+
+  for (const [entryId, season] of Object.entries(groupRecord.inferredSeasonByEntryId)) {
+    const item = ensureItem(entryId)
+    item.role = 'season-folder'
+    item.season = season ?? item.season
+  }
+
+  return classification
+}
+
+function buildAiRenameGroupPlan(groupRecord, classification, extensionSets, operationRoot) {
+  const { groupEntries } = groupRecord
   const entryById = new Map(groupEntries.map((entry) => [entry.id, entry]))
   const classifiedItems = classification.items.filter((item) => entryById.has(item.id))
   const itemById = new Map(classifiedItems.map((item) => [item.id, item]))
@@ -3545,7 +4046,7 @@ function buildAiRenameGroupPlan(groupEntries, classification, extensionSets, ope
       operations.push({
         depth: entry.depth,
         entryId: entry.id,
-        isTopFolder: entry.id === topEntry?.id,
+        isTopFolder: entry.depth === 1,
         kind: 'folder',
         newName,
         oldName: entry.name,
@@ -3574,7 +4075,10 @@ function buildAiRenameGroupPlan(groupEntries, classification, extensionSets, ope
     classification,
     entries: groupEntries,
     entryById,
+    groupParentPath: groupRecord.groupParentPath,
+    groupPath: groupRecord.groupPath,
     itemById,
+    layoutHint: groupRecord.layoutHint,
     mediaType: classification.mediaType,
     operationRoot,
     operations,
@@ -3583,6 +4087,7 @@ function buildAiRenameGroupPlan(groupEntries, classification, extensionSets, ope
       : '',
     seriesTitle: isTelevision ? formatSeriesTitle(classification.series, true) : '',
     topEntry,
+    topEntries: groupEntries.filter((entry) => entry.kind === 'folder' && entry.depth === 1),
     topRole,
     topSeason,
   }
@@ -3750,6 +4255,174 @@ async function executeAiRenameOperation(job, storage, operationRoot, operation) 
   }
 }
 
+async function moveFlatAiRenameFilesIntoSeasons(job, storage, plan, seriesDirectory) {
+  const directFileOperations = plan.operations.filter((operation) => {
+    const entry = plan.entryById.get(operation.entryId)
+    return (
+      operation.kind === 'file' &&
+      operation.currentPath &&
+      entry &&
+      plan.topEntry &&
+      storagePathsEqual(
+        storage,
+        entry.parentPath || getStorageParentPath(storage, entry.path),
+        plan.topEntry.path,
+      )
+    )
+  })
+
+  for (const operation of directFileOperations) {
+    const item = plan.itemById.get(operation.entryId)
+    const linkedItem = item?.sidecarFor ? plan.itemById.get(String(item.sidecarFor)) : undefined
+    const season = item?.season ?? linkedItem?.season ?? plan.classification.series.season
+    const seasonName = formatSeasonDirectory(season)
+
+    if (!seasonName || (item?.role !== 'episode' && linkedItem?.role !== 'episode')) {
+      continue
+    }
+
+    const sourcePath = joinStoragePath(
+      storage,
+      seriesDirectory,
+      getStoragePathName(storage, operation.currentPath),
+    )
+    const seasonDirectory = joinStoragePath(storage, seriesDirectory, seasonName)
+    const targetPath = joinStoragePath(
+      storage,
+      seasonDirectory,
+      getStoragePathName(storage, sourcePath),
+    )
+    job.progress.totalOperations += 1
+
+    try {
+      assertStoragePathInside(storage, targetPath, plan.operationRoot)
+      await ensureStorageDirectory(storage, seasonDirectory, plan.operationRoot, job.pathState)
+
+      if (
+        storagePathStateHas(job.pathState, storage, targetPath) ||
+        (!job.pathState && (await storageEntryExists(storage, targetPath)))
+      ) {
+        appendAiRenameJobResult(
+          job,
+          {
+            action: 'move',
+            message: '目标季目录中已存在同名文件',
+            newPath: targetPath,
+            oldPath: sourcePath,
+            status: 'skipped',
+          },
+          'skipped',
+        )
+        continue
+      }
+
+      const movedPath = await moveStorageEntry(storage, sourcePath, seasonDirectory)
+      operation.currentPath = movedPath
+      moveStoragePathState(job.pathState, storage, sourcePath, movedPath)
+      appendAiRenameJobResult(
+        job,
+        {
+          action: 'move',
+          message: '平铺文件已移动到标准季目录',
+          newPath: movedPath,
+          oldPath: sourcePath,
+          status: 'succeeded',
+        },
+        'succeeded',
+      )
+    } catch (error) {
+      appendAiRenameJobResult(
+        job,
+        {
+          action: 'move',
+          message: getErrorMessage(error),
+          newPath: targetPath,
+          oldPath: sourcePath,
+          status: 'failed',
+        },
+        'failed',
+      )
+    }
+  }
+}
+
+async function moveAiRenameSeasonFolder(job, storage, plan, topEntry, season) {
+  job.progress.totalOperations += 1
+  const topSourcePath = topEntry.path
+  const seasonName = formatSeasonDirectory(season)
+  const seriesDirectory = joinStoragePath(
+    storage,
+    plan.groupParentPath || plan.operationRoot,
+    plan.seriesTitle,
+  )
+  const finalSeasonPath = seasonName ? joinStoragePath(storage, seriesDirectory, seasonName) : ''
+
+  if (!seasonName) {
+    appendAiRenameJobResult(
+      job,
+      {
+        action: 'move',
+        message: '未识别出季号，无法创建标准季目录',
+        oldPath: topSourcePath,
+        status: 'skipped',
+      },
+      'skipped',
+    )
+    return
+  }
+
+  try {
+    assertStoragePathInside(storage, finalSeasonPath, plan.operationRoot)
+
+    if (
+      storagePathStateHas(job.pathState, storage, finalSeasonPath) ||
+      (!job.pathState && (await storageEntryExists(storage, finalSeasonPath)))
+    ) {
+      appendAiRenameJobResult(
+        job,
+        {
+          action: 'move',
+          message: '同一剧集的目标季目录已存在，已跳过重复季',
+          newPath: finalSeasonPath,
+          oldPath: topSourcePath,
+          status: 'skipped',
+        },
+        'skipped',
+      )
+      return
+    }
+
+    await ensureStorageDirectory(storage, seriesDirectory, plan.operationRoot, job.pathState)
+    const movedPath = await moveStorageEntry(storage, topSourcePath, seriesDirectory)
+    moveStoragePathState(job.pathState, storage, topSourcePath, movedPath)
+    const finalPath = await renameStorageEntry(storage, movedPath, seasonName)
+    moveStoragePathState(job.pathState, storage, movedPath, finalPath)
+    appendAiRenameJobResult(
+      job,
+      {
+        action: 'move',
+        message: '整季目录已归入标准剧集目录',
+        newPath: finalPath,
+        oldPath: topSourcePath,
+        status: 'succeeded',
+      },
+      'succeeded',
+    )
+  } catch (error) {
+    appendAiRenameJobResult(
+      job,
+      {
+        action: 'move',
+        message: getErrorMessage(error),
+        newPath: finalSeasonPath,
+        oldPath: topSourcePath,
+        status: 'failed',
+      },
+      'failed',
+    )
+  }
+}
+
 async function executeAiMovePlan(job, storage, plan) {
   throwIfAiRenameCancelled(job)
 
@@ -3766,7 +4439,11 @@ async function executeAiMovePlan(job, storage, plan) {
         continue
       }
 
-      const seriesDirectory = joinStoragePath(storage, plan.operationRoot, plan.seriesTitle)
+      const seriesDirectory = joinStoragePath(
+        storage,
+        plan.groupParentPath || plan.operationRoot,
+        plan.seriesTitle,
+      )
       const seasonDirectory = joinStoragePath(storage, seriesDirectory, seasonName)
       const sourcePath = operation.currentPath
       const targetPath = joinStoragePath(
@@ -3829,79 +4506,23 @@ async function executeAiMovePlan(job, storage, plan) {
     return
   }
 
-  const topSourcePath = plan.topEntry.path
+  if (plan.layoutHint === 'season-folders') {
+    for (const topEntry of plan.topEntries) {
+      const topItem = plan.itemById.get(topEntry.id)
+      await moveAiRenameSeasonFolder(
+        job,
+        storage,
+        plan,
+        topEntry,
+        topItem?.season ?? plan.classification.series.season,
+      )
+    }
+
+    return
+  }
 
   if (plan.topRole === 'season-folder') {
-    job.progress.totalOperations += 1
-    const seasonName = formatSeasonDirectory(plan.topSeason)
-    const seriesDirectory = joinStoragePath(storage, plan.operationRoot, plan.seriesTitle)
-    const finalSeasonPath = seasonName ? joinStoragePath(storage, seriesDirectory, seasonName) : ''
-
-    if (!seasonName) {
-      appendAiRenameJobResult(
-        job,
-        {
-          action: 'move',
-          message: '未识别出季号，无法创建标准季目录',
-          oldPath: topSourcePath,
-          status: 'skipped',
-        },
-        'skipped',
-      )
-      return
-    }
-
-    try {
-      assertStoragePathInside(storage, finalSeasonPath, plan.operationRoot)
-
-      if (
-        storagePathStateHas(job.pathState, storage, finalSeasonPath) ||
-        (!job.pathState && (await storageEntryExists(storage, finalSeasonPath)))
-      ) {
-        appendAiRenameJobResult(
-          job,
-          {
-            action: 'move',
-            message: '同一剧集的目标季目录已存在，已跳过重复季',
-            newPath: finalSeasonPath,
-            oldPath: topSourcePath,
-            status: 'skipped',
-          },
-          'skipped',
-        )
-        return
-      }
-
-      await ensureStorageDirectory(storage, seriesDirectory, plan.operationRoot, job.pathState)
-      const movedPath = await moveStorageEntry(storage, topSourcePath, seriesDirectory)
-      moveStoragePathState(job.pathState, storage, topSourcePath, movedPath)
-      const finalPath = await renameStorageEntry(storage, movedPath, seasonName)
-      moveStoragePathState(job.pathState, storage, movedPath, finalPath)
-      appendAiRenameJobResult(
-        job,
-        {
-          action: 'move',
-          message: '整季目录已归入标准剧集目录',
-          newPath: finalPath,
-          oldPath: topSourcePath,
-          status: 'succeeded',
-        },
-        'succeeded',
-      )
-    } catch (error) {
-      appendAiRenameJobResult(
-        job,
-        {
-          action: 'move',
-          message: getErrorMessage(error),
-          newPath: finalSeasonPath,
-          oldPath: topSourcePath,
-          status: 'failed',
-        },
-        'failed',
-      )
-    }
-
+    await moveAiRenameSeasonFolder(job, storage, plan, plan.topEntry, plan.topSeason)
     return
   }
 
@@ -3910,7 +4531,16 @@ async function executeAiMovePlan(job, storage, plan) {
 
     if (topOperation) {
       job.progress.totalOperations += 1
-      await executeAiRenameOperation(job, storage, plan.operationRoot, topOperation)
+      const seriesDirectory = await executeAiRenameOperation(
+        job,
+        storage,
+        plan.operationRoot,
+        topOperation,
+      )
+
+      if (seriesDirectory) {
+        await moveFlatAiRenameFilesIntoSeasons(job, storage, plan, seriesDirectory)
+      }
     }
   }
 }
@@ -3923,7 +4553,7 @@ async function executeAiRenamePlan(job, storage, plan, allowMove, groupIndex, gr
     (operation) => !(allowMove === true && plan.mediaType === 'tv' && operation.isTopFolder),
   )
   job.progress.totalOperations += operations.length
-  setAiRenameJobStage(job, 'executing', `正在逐项修改第 ${groupIndex}/${groupCount} 个目录`)
+  setAiRenameJobStage(job, 'executing', `正在逐项修改第 ${groupIndex}/${groupCount} 个逻辑媒体组`)
 
   for (const operation of operations
     .filter((item) => item.kind === 'file')
@@ -3938,7 +4568,11 @@ async function executeAiRenamePlan(job, storage, plan, allowMove, groupIndex, gr
   }
 
   if (allowMove === true && plan.mediaType === 'tv') {
-    setAiRenameJobStage(job, 'moving', `正在整理第 ${groupIndex}/${groupCount} 个目录的标准季结构`)
+    setAiRenameJobStage(
+      job,
+      'moving',
+      `正在整理第 ${groupIndex}/${groupCount} 个逻辑媒体组的标准季结构`,
+    )
     await executeAiMovePlan(job, storage, plan)
   }
 }
@@ -3974,10 +4608,12 @@ async function runAiRenameJob(job, payload) {
     throwIfAiRenameCancelled(job)
 
     const rootNames = entries.filter((entry) => entry.depth === 1).map((entry) => entry.name)
-    const allGroupRecords = createAiRenameGroupRecords(entries, extensionSets).map((record) => ({
-      ...record,
-      groupPath: record.groupPath || operationRoot,
-    }))
+    const allGroupRecords = createAiRenameGroupRecords(
+      entries,
+      extensionSets,
+      storage,
+      operationRoot,
+    ).map((record) => ({ ...record, groupPath: record.groupPath || operationRoot }))
     const unchangedFingerprints = new Set(
       Array.isArray(payload.unchangedGroupFingerprints)
         ? payload.unchangedGroupFingerprints.map((fingerprint) => String(fingerprint))
@@ -4009,7 +4645,7 @@ async function runAiRenameJob(job, payload) {
     if (unchangedGroupCount > 0) {
       appendAiRenameJobResult(job, {
         action: 'inventory',
-        message: `增量计算跳过 ${unchangedGroupCount} 个未变化目录，本次仅提交 ${groupRecords.length} 个变化目录`,
+        message: `增量计算跳过 ${unchangedGroupCount} 个未变化逻辑媒体组，本次仅提交 ${groupRecords.length} 个变化组`,
         oldPath: operationRoot,
         status: 'info',
       })
@@ -4026,11 +4662,11 @@ async function runAiRenameJob(job, payload) {
       setAiRenameJobStage(
         job,
         'analyzing',
-        `正在一次性提交 ${groupRecords.length} 个视频目录给 AI 识别`,
+        `正在一次性提交 ${groupRecords.length} 个逻辑媒体组给 AI 识别`,
       )
       appendAiRenameJobResult(job, {
         action: 'inventory',
-        message: `已汇总 ${groupRecords.length} 个视频目录、${inventoryEntryCount} 个条目，正在进行一次性 AI 识别`,
+        message: `已汇总 ${groupRecords.length} 个逻辑媒体组、${inventoryEntryCount} 个条目，正在进行一次性 AI 识别`,
         oldPath: operationRoot,
         status: 'info',
       })
@@ -4044,21 +4680,21 @@ async function runAiRenameJob(job, payload) {
       throwIfAiRenameCancelled(job)
       appendAiRenameJobResult(job, {
         action: 'inventory',
-        message: `AI 已一次性返回 ${suggestionsByGroup.size}/${groupRecords.length} 个目录的修改建议，开始按顺序执行`,
+        message: `AI 已一次性返回 ${suggestionsByGroup.size}/${groupRecords.length} 个逻辑媒体组的修改建议，开始按顺序执行`,
         oldPath: operationRoot,
         status: 'info',
       })
     } else if (allGroupRecords.length > 0) {
       appendAiRenameJobResult(job, {
         action: 'inventory',
-        message: `增量计算确认 ${allGroupRecords.length} 个视频目录均未变化，本次未调用 AI`,
+        message: `增量计算确认 ${allGroupRecords.length} 个逻辑媒体组均未变化，本次未调用 AI`,
         oldPath: operationRoot,
         status: 'info',
       })
     } else {
       appendAiRenameJobResult(job, {
         action: 'inventory',
-        message: '未扫描到可处理的视频目录，未调用 AI',
+        message: '未扫描到可处理的逻辑媒体组，未调用 AI',
         oldPath: operationRoot,
         status: 'info',
       })
@@ -4067,16 +4703,16 @@ async function runAiRenameJob(job, payload) {
     for (const [groupOffset, groupRecord] of groupRecords.entries()) {
       throwIfAiRenameCancelled(job)
       const groupIndex = groupOffset + 1
-      const { groupEntries, groupId, groupPath } = groupRecord
+      const { groupEntries, groupId, groupPath, groupRootPaths } = groupRecord
       job.currentPath = groupPath
       setAiRenameJobStage(
         job,
         'executing',
-        `AI 建议已返回，正在准备修改第 ${groupIndex}/${groupRecords.length} 个目录`,
+        `AI 建议已返回，正在准备修改第 ${groupIndex}/${groupRecords.length} 个逻辑媒体组`,
       )
       appendAiRenameJobResult(job, {
         action: 'directory',
-        message: `开始执行 AI 建议（${groupIndex}/${groupRecords.length}）`,
+        message: `开始执行 AI 建议（${groupIndex}/${groupRecords.length}），逻辑组根：${groupRootPaths.join('、')}`,
         oldPath: groupPath,
         status: 'info',
       })
@@ -4092,7 +4728,10 @@ async function runAiRenameJob(job, payload) {
           throw new Error(suggestion.error)
         }
 
-        const classification = normalizeAiClassification(suggestion.payload)
+        const classification = applyAiRenameStructuralHints(
+          normalizeAiClassification(suggestion.payload),
+          groupRecord,
+        )
         const mediaHint = inferAiRenameMediaHint(groupPath)
 
         if (mediaHint === 'movie' && classification.mediaType === 'tv') {
@@ -4118,7 +4757,7 @@ async function runAiRenameJob(job, payload) {
         }
 
         const plan = buildAiRenameGroupPlan(
-          groupEntries,
+          groupRecord,
           classification,
           extensionSets,
           operationRoot,
@@ -4136,7 +4775,7 @@ async function runAiRenameJob(job, payload) {
           job.progress.processedGroups = groupIndex
           appendAiRenameJobResult(job, {
             action: 'directory',
-            message: `目录处理完成（${groupIndex}/${groupRecords.length}），继续执行下一目录`,
+            message: `逻辑媒体组处理完成（${groupIndex}/${groupRecords.length}），继续执行下一组`,
             oldPath: groupPath,
             status: 'info',
           })
@@ -4233,7 +4872,7 @@ async function runAiRenameJob(job, payload) {
         job.incrementalInventory.baselineUpdated = true
         appendAiRenameJobResult(job, {
           action: 'inventory',
-          message: `增量基线已更新：${groupFingerprints.length} 个视频目录；下次仅提交新增或变化目录`,
+          message: `增量基线已更新：${groupFingerprints.length} 个逻辑媒体组；下次仅提交新增或变化组`,
           oldPath: payload.path,
           status: 'info',
         })
@@ -4531,7 +5170,7 @@ async function runAiRenameTask(taskId) {
         String(fingerprint),
       )
       incrementalBaselineStatus = 'loaded'
-      incrementalBaselineMessage = `已加载增量基线：${unchangedGroupFingerprints.length} 个已处理视频目录。`
+      incrementalBaselineMessage = `已加载增量基线：${unchangedGroupFingerprints.length} 个已处理逻辑媒体组。`
     }
   } catch (error) {
     incrementalBaselineStatus = 'error'
@@ -6974,9 +7613,16 @@ async function scanAiRenameInventoryFingerprints(storage, taskPath, settings) {
     progress: { scanned: 0 },
   }
   const extensionSets = getRenameExtensionSets(settings.strm)
-  const { entries } = await scanAiRenameTree(storage, taskPath, scanJob, extensionSets)
+  const { entries, operationRoot } = await scanAiRenameTree(
+    storage,
+    taskPath,
+    scanJob,
+    extensionSets,
+  )
 
-  return createAiRenameGroupRecords(entries, extensionSets).map((record) => record.fingerprint)
+  return createAiRenameGroupRecords(entries, extensionSets, storage, operationRoot).map(
+    (record) => record.fingerprint,
+  )
 }
 
 async function runPreStrmAiRename(task, storage, settings, logLines) {
@@ -6997,7 +7643,7 @@ async function runPreStrmAiRename(task, storage, settings, logLines) {
       unchangedGroupFingerprints = taskState.groupFingerprints.map((fingerprint) =>
         String(fingerprint),
       )
-      logLines.push(`AI 增量基线已加载：${unchangedGroupFingerprints.length} 个已处理视频目录。`)
+      logLines.push(`AI 增量基线已加载：${unchangedGroupFingerprints.length} 个已处理逻辑媒体组。`)
     } else {
       logLines.push('AI 增量基线不存在或配置已变化，本次执行全量目录识别。')
     }
@@ -7067,7 +7713,7 @@ async function runPreStrmAiRename(task, storage, settings, logLines) {
     `AI 重命名预处理完成：状态 ${result.status}，成功 ${result.progress.succeeded}，跳过 ${result.progress.skipped}，失败 ${result.progress.failed}。`,
   )
   logLines.push(
-    `AI 增量统计：视频目录 ${incrementalInventory.inventoryGroups} 个，提交 LLM ${incrementalInventory.submittedGroups} 个，未变化跳过 ${incrementalInventory.unchangedGroups} 个。`,
+    `AI 增量统计：逻辑媒体组 ${incrementalInventory.inventoryGroups} 个，提交 LLM ${incrementalInventory.submittedGroups} 个，未变化跳过 ${incrementalInventory.unchangedGroups} 个。`,
   )
 
   if (!['completed', 'partial'].includes(result.status)) {
@@ -7091,7 +7737,7 @@ async function runPreStrmAiRename(task, storage, settings, logLines) {
       updatedAt: new Date().toISOString(),
     })
     logLines.push(
-      `AI 增量基线已更新：${groupFingerprints.length} 个视频目录；下次仅提交新增或变化目录。`,
+      `AI 增量基线已更新：${groupFingerprints.length} 个逻辑媒体组；下次仅提交新增或变化组。`,
     )
   } catch (error) {
     logLines.push(`更新 AI 增量基线失败，下次将重新识别: ${getErrorMessage(error)}`)
