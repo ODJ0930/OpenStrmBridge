@@ -65,6 +65,7 @@ const defaultAiRenamePromptTemplate = [
   '广告图片、网站宣传文件、发布组与画质编码信息应忽略；无法可靠识别的条目不要猜测。',
   '字幕、NFO、海报等附属文件只在能可靠关联视频时标记。',
 ].join('\n')
+const AI_RENAME_LOGICAL_GROUPING_VERSION = 4
 const port = Number.parseInt(process.env.OPENSTRMBRIDGE_BACKEND_PORT ?? '', 10) || DEFAULT_PORT
 const host = process.env.OPENSTRMBRIDGE_BACKEND_HOST?.trim() || '127.0.0.1'
 const dataDir = process.env.OPENSTRMBRIDGE_DATA_DIR ?? path.join(process.cwd(), 'data')
@@ -3663,6 +3664,20 @@ function createAiRenameGroupRecords(entries, extensionSets, storage, operationRo
     )
 }
 
+async function scanAiRenameLogicalInventory(storage, requestedPath, job, extensionSets) {
+  const scanResult = await scanAiRenameTree(storage, requestedPath, job, extensionSets)
+
+  return {
+    ...scanResult,
+    groupRecords: createAiRenameGroupRecords(
+      scanResult.entries,
+      extensionSets,
+      storage,
+      scanResult.operationRoot,
+    ),
+  }
+}
+
 function createAiRenameGroupFingerprint(groupEntries, groupMetadata = {}) {
   const inventory = groupEntries
     .map((entry) => ({
@@ -3687,7 +3702,7 @@ function createAiRenameGroupFingerprint(groupEntries, groupMetadata = {}) {
         groupPath: String(groupMetadata.groupPath ?? '').replaceAll('\\', '/'),
         inventory,
         layoutHint: groupMetadata.layoutHint ?? '',
-        version: 3,
+        version: AI_RENAME_LOGICAL_GROUPING_VERSION,
       }),
     )
     .digest('hex')
@@ -3707,7 +3722,7 @@ function createAiRenameConfigurationFingerprint(aiSettings, taskOptions = {}) {
         tmdbEnabled: aiSettings.tmdbEnabled && Boolean(aiSettings.tmdbToken),
         tmdbLanguage: aiSettings.tmdbLanguage,
         taskOptions,
-        version: 3,
+        version: AI_RENAME_LOGICAL_GROUPING_VERSION,
       }),
     )
     .digest('hex')
@@ -4598,22 +4613,20 @@ async function runAiRenameJob(job, payload) {
     })
     const extensionSets = getRenameExtensionSets(settings.strm)
     setAiRenameJobStage(job, 'scanning', '正在递归扫描目录')
-    const { entries, operationRoot, pathState } = await scanAiRenameTree(
-      storage,
-      payload.path,
-      job,
-      extensionSets,
-    )
+    const {
+      entries,
+      groupRecords: discoveredGroupRecords,
+      operationRoot,
+      pathState,
+    } = await scanAiRenameLogicalInventory(storage, payload.path, job, extensionSets)
     job.pathState = pathState
     throwIfAiRenameCancelled(job)
 
     const rootNames = entries.filter((entry) => entry.depth === 1).map((entry) => entry.name)
-    const allGroupRecords = createAiRenameGroupRecords(
-      entries,
-      extensionSets,
-      storage,
-      operationRoot,
-    ).map((record) => ({ ...record, groupPath: record.groupPath || operationRoot }))
+    const allGroupRecords = discoveredGroupRecords.map((record) => ({
+      ...record,
+      groupPath: record.groupPath || operationRoot,
+    }))
     const unchangedFingerprints = new Set(
       Array.isArray(payload.unchangedGroupFingerprints)
         ? payload.unchangedGroupFingerprints.map((fingerprint) => String(fingerprint))
@@ -7613,16 +7626,14 @@ async function scanAiRenameInventoryFingerprints(storage, taskPath, settings) {
     progress: { scanned: 0 },
   }
   const extensionSets = getRenameExtensionSets(settings.strm)
-  const { entries, operationRoot } = await scanAiRenameTree(
+  const { groupRecords } = await scanAiRenameLogicalInventory(
     storage,
     taskPath,
     scanJob,
     extensionSets,
   )
 
-  return createAiRenameGroupRecords(entries, extensionSets, storage, operationRoot).map(
-    (record) => record.fingerprint,
-  )
+  return groupRecords.map((record) => record.fingerprint)
 }
 
 async function runPreStrmAiRename(task, storage, settings, logLines) {

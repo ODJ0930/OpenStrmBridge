@@ -107,6 +107,7 @@ describe('AI rename local-storage integration', () => {
   let tempDirectory
   let libraryDirectory
   let managedLibraryDirectory
+  let managedNestedLibraryDirectory
   let movieLibraryDirectory
   let moveLibraryDirectory
   let nestedLibraryDirectory
@@ -154,6 +155,21 @@ describe('AI rename local-storage integration', () => {
       'black-mirror-season-3',
     )
     await mkdir(path.join(nestedLibraryDirectory, '电视剧', '空目录'), { recursive: true })
+    managedNestedLibraryDirectory = path.join(tempDirectory, 'managed-nested-library')
+    const managedNestedSeasonDirectory = path.join(
+      managedNestedLibraryDirectory,
+      '电视剧',
+      '黑镜',
+      'Black.Mirror.S03',
+    )
+    await mkdir(managedNestedSeasonDirectory, { recursive: true })
+    await writeFile(
+      path.join(managedNestedSeasonDirectory, 'Black.Mirror.S03E01.1080p.mkv'),
+      'managed-black-mirror-season-3',
+    )
+    await mkdir(path.join(managedNestedLibraryDirectory, '电视剧', '空目录'), {
+      recursive: true,
+    })
     managedLibraryDirectory = path.join(tempDirectory, 'managed-library')
     const managedSeasonDirectory = path.join(managedLibraryDirectory, 'Rick.and.Morty.S05.1080p')
     const managedUnknownDirectory = path.join(managedLibraryDirectory, 'Unknown.Show')
@@ -517,6 +533,15 @@ describe('AI rename local-storage integration', () => {
           local: { path: managedLibraryDirectory },
           name: '本地任务管理测试',
           rootPath: managedLibraryDirectory,
+          status: 'connected',
+        },
+        {
+          accessMethod: 'local',
+          endpoint: managedNestedLibraryDirectory,
+          id: 'local-managed-nested-test',
+          local: { path: managedNestedLibraryDirectory },
+          name: '本地托管深层目录测试',
+          rootPath: managedNestedLibraryDirectory,
           status: 'connected',
         },
         {
@@ -928,6 +953,136 @@ describe('AI rename local-storage integration', () => {
         }),
       ]),
     )
+  }, 20_000)
+
+  it('uses deep logical media groups for managed AI rename tasks and their incremental baseline', async () => {
+    const headers = {
+      'Content-Type': 'application/json',
+      Origin: backendBaseUrl,
+      Referer: `${backendBaseUrl}/ai-rename-tasks`,
+    }
+    const taskId = 'managed-deep-media-task'
+    const runManagedTask = async () => {
+      const runResponse = await fetch(
+        `${backendBaseUrl}/api/ai-rename/tasks/${encodeURIComponent(taskId)}/run`,
+        { headers, method: 'POST' },
+      )
+      expect(runResponse.status).toBe(202)
+      let job = (await runResponse.json()).job
+
+      for (
+        let attempt = 0;
+        attempt < 100 && !['completed', 'partial', 'failed'].includes(job.status);
+        attempt += 1
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 100))
+        job = await (
+          await fetch(
+            `${backendBaseUrl}/api/ai-rename/tasks/${encodeURIComponent(taskId)}/result`,
+            { headers },
+          )
+        ).json()
+      }
+
+      return job
+    }
+    const saveResponse = await fetch(
+      `${backendBaseUrl}/api/ai-rename/tasks/${encodeURIComponent(taskId)}`,
+      {
+        body: JSON.stringify({
+          allowMove: true,
+          extraPrompt: '',
+          name: '托管任务整理黑镜第三季',
+          path: managedNestedLibraryDirectory,
+          storageId: 'local-managed-nested-test',
+          useTmdb: false,
+        }),
+        headers,
+        method: 'PUT',
+      },
+    )
+    expect(saveResponse.status).toBe(200)
+    const inventoryRequestCountBefore = inventoryRequests.length
+    let job = await runManagedTask()
+
+    expect(job.status, JSON.stringify(job, null, 2)).toBe('completed')
+    expect(job.taskId).toBe(taskId)
+    expect(job.incrementalInventory).toMatchObject({
+      baselineUpdated: true,
+      inventoryGroups: 1,
+      submittedGroups: 1,
+      unchangedGroups: 0,
+    })
+    const canonicalSeriesDirectory = path.join(
+      managedNestedLibraryDirectory,
+      '电视剧',
+      '黑镜 (Black Mirror) (2011)',
+    )
+    const canonicalMediaFile = path.join(
+      canonicalSeriesDirectory,
+      'Season 03',
+      '黑镜 (Black Mirror) - S03E01.mkv',
+    )
+    expect(await readdir(managedNestedLibraryDirectory)).toEqual(['电视剧'])
+    expect(await readFile(canonicalMediaFile, 'utf8')).toBe('managed-black-mirror-season-3')
+    const submittedInventory = inventoryRequests[inventoryRequestCountBefore]
+    expect(submittedInventory).toHaveLength(1)
+    expect(submittedInventory[0]).toMatchObject({
+      directoryName: '黑镜',
+      directoryPath: '电视剧/黑镜',
+      layoutHint: 'series-container',
+      mediaHint: 'tv',
+    })
+    expect(job.results).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          action: 'directory',
+          message: expect.stringContaining('逻辑组根：'),
+          oldPath: path.join(managedNestedLibraryDirectory, '电视剧', '黑镜'),
+        }),
+      ]),
+    )
+
+    const aiRequestCountAfterInitialRun = aiRequestPayloads.length
+    job = await runManagedTask()
+    expect(job.status, JSON.stringify(job, null, 2)).toBe('completed')
+    expect(job.incrementalInventory).toMatchObject({
+      baselineUpdated: true,
+      inventoryGroups: 1,
+      submittedGroups: 0,
+      unchangedGroups: 1,
+    })
+    expect(aiRequestPayloads).toHaveLength(aiRequestCountAfterInitialRun)
+    expect(job.results).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ message: expect.stringContaining('本次未调用 AI') }),
+      ]),
+    )
+
+    await writeFile(canonicalMediaFile, 'managed-black-mirror-season-3-updated-content')
+    job = await runManagedTask()
+    expect(job.status, JSON.stringify(job, null, 2)).toBe('completed')
+    expect(job.incrementalInventory).toMatchObject({
+      baselineUpdated: true,
+      inventoryGroups: 1,
+      submittedGroups: 1,
+      unchangedGroups: 0,
+    })
+    expect(aiRequestPayloads).toHaveLength(aiRequestCountAfterInitialRun + 1)
+    expect(inventoryRequests.at(-1)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          directoryPath: '电视剧/黑镜 (Black Mirror) (2011)',
+          layoutHint: 'series-container',
+        }),
+      ]),
+    )
+
+    const deleteResponse = await fetch(
+      `${backendBaseUrl}/api/ai-rename/tasks/${encodeURIComponent(taskId)}`,
+      { headers, method: 'DELETE' },
+    )
+    expect(deleteResponse.status).toBe(200)
   }, 20_000)
 
   it('persists, runs, reports and deletes a managed AI rename task', async () => {
