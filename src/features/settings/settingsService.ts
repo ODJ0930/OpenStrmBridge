@@ -166,6 +166,7 @@ function getDefaultAiRenameSettings(): AiRenameSettings {
     apiKeyConfigured: false,
     baseUrl: 'https://api.openai.com/v1',
     customParameters: '{}',
+    maxVideosPerRequest: 100,
     model: '',
     namingStyle: 'zh-en',
     promptTemplate: [

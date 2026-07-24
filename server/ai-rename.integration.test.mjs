@@ -105,6 +105,7 @@ describe('AI rename local-storage integration', () => {
   let backendBaseUrl
   let backendProcess
   let tempDirectory
+  let batchLibraryDirectory
   let libraryDirectory
   let managedLibraryDirectory
   let managedNestedLibraryDirectory
@@ -131,6 +132,18 @@ describe('AI rename local-storage integration', () => {
     await mkdir(sourceDirectory, { recursive: true })
     await writeFile(path.join(sourceDirectory, 'S06E01.Solaricks.1080p.HD中英双字.mp4'), 'media')
     await writeFile(path.join(sourceDirectory, '更多电视剧下载请访问官网.png'), 'advert')
+    batchLibraryDirectory = path.join(tempDirectory, 'batch-library')
+    const batchSeasonDirectory = path.join(batchLibraryDirectory, '电视剧', 'Batch.Show.S01')
+    await mkdir(batchSeasonDirectory, { recursive: true })
+    await Promise.all(
+      Array.from({ length: 201 }, (_, index) => {
+        const episode = String(index + 1).padStart(3, '0')
+        return writeFile(
+          path.join(batchSeasonDirectory, `Batch.Show.S01E${episode}.mkv`),
+          `episode-${episode}`,
+        )
+      }),
+    )
     movieLibraryDirectory = path.join(tempDirectory, 'movie-library')
     const movieCollectionDirectory = path.join(movieLibraryDirectory, 'Fast & Furious Collection')
     await mkdir(movieCollectionDirectory, { recursive: true })
@@ -202,6 +215,10 @@ describe('AI rename local-storage integration', () => {
     const preStrmSeasonDirectory = path.join(preStrmLibraryDirectory, 'Rick.and.Morty.S07.1080p')
     await mkdir(preStrmSeasonDirectory, { recursive: true })
     await writeFile(path.join(preStrmSeasonDirectory, 'Rick.and.Morty.S07E01.mkv'), 'pre-strm')
+    await writeFile(
+      path.join(preStrmSeasonDirectory, 'Rick.and.Morty.S07E01.zh-CN.srt'),
+      'pre-strm-subtitle',
+    )
     strmOutputDirectory = path.join(tempDirectory, 'strm-output')
 
     aiServer = createServer(async (request, response) => {
@@ -356,7 +373,8 @@ describe('AI rename local-storage integration', () => {
           }
 
           if (/\.(?:mp4|mkv)$/i.test(entry.name)) {
-            return { episodes: [1], id: entry.id, role: 'episode', season: entrySeason }
+            const episode = Number.parseInt(entry.name.match(/E(\d{1,4})/i)?.[1] ?? '1', 10)
+            return { episodes: [episode], id: entry.id, role: 'episode', season: entrySeason }
           }
 
           return { id: entry.id, role: 'ignore' }
@@ -538,6 +556,15 @@ describe('AI rename local-storage integration', () => {
         },
         {
           accessMethod: 'local',
+          endpoint: batchLibraryDirectory,
+          id: 'local-batch-test',
+          local: { path: batchLibraryDirectory },
+          name: '本地分批上限测试',
+          rootPath: batchLibraryDirectory,
+          status: 'connected',
+        },
+        {
+          accessMethod: 'local',
           endpoint: moveLibraryDirectory,
           id: 'local-move-test',
           local: { path: moveLibraryDirectory },
@@ -626,6 +653,7 @@ describe('AI rename local-storage integration', () => {
           apiKey: 'integration-secret',
           baseUrl: aiBaseUrl,
           model: 'integration-model',
+          maxVideosPerRequest: 100,
           tmdbEnabled: false,
         },
         strm: {
@@ -746,6 +774,7 @@ describe('AI rename local-storage integration', () => {
       apiKeyConfigured: true,
       baseUrl: aiBaseUrl,
       customParameters: '{}',
+      maxVideosPerRequest: 100,
       model: 'integration-model',
       namingStyle: 'zh-en',
       promptTemplate: expect.any(String),
@@ -878,6 +907,81 @@ describe('AI rename local-storage integration', () => {
       await readFile(path.join(renamedDirectory, '更多电视剧下载请访问官网.png'), 'utf8'),
     ).toBe('advert')
   }, 20_000)
+
+  it('honors the custom video limit for sequential AI requests', async () => {
+    const headers = {
+      'Content-Type': 'application/json',
+      Origin: backendBaseUrl,
+      Referer: `${backendBaseUrl}/ai-rename-tasks`,
+    }
+    const inventoryRequestCountBefore = inventoryRequests.length
+    const limitResponse = await fetch(`${backendBaseUrl}/api/settings/ai-rename`, {
+      body: JSON.stringify({ maxVideosPerRequest: 75 }),
+      headers,
+      method: 'PUT',
+    })
+    expect(limitResponse.status).toBe(200)
+    expect(await limitResponse.json()).toMatchObject({ maxVideosPerRequest: 75 })
+    const createResponse = await fetch(`${backendBaseUrl}/api/storage/ai-rename/jobs`, {
+      body: JSON.stringify({
+        allowMove: false,
+        path: batchLibraryDirectory,
+        recursive: true,
+        storageId: 'local-batch-test',
+        useTmdb: false,
+      }),
+      headers,
+      method: 'POST',
+    })
+    expect(createResponse.status).toBe(202)
+    let job = await createResponse.json()
+
+    for (
+      let attempt = 0;
+      attempt < 300 && !['completed', 'partial', 'failed'].includes(job.status);
+      attempt += 1
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      job = await (
+        await fetch(`${backendBaseUrl}/api/storage/ai-rename/jobs/${encodeURIComponent(job.id)}`, {
+          headers,
+        })
+      ).json()
+    }
+
+    expect(job.status, JSON.stringify(job, null, 2)).toBe('completed')
+    const batchRequests = inventoryRequests.slice(inventoryRequestCountBefore)
+    const videoCounts = batchRequests.map(
+      (inventory) =>
+        inventory
+          .flatMap((group) => group.entries)
+          .filter((entry) => entry.kind === 'file' && /\.(?:mp4|mkv)$/i.test(entry.name)).length,
+    )
+    expect(videoCounts).toEqual([75, 75, 51])
+    expect(Math.max(...videoCounts)).toBeLessThanOrEqual(75)
+    expect(
+      new Set(
+        batchRequests
+          .flatMap((inventory) => inventory)
+          .flatMap((group) => group.entries)
+          .filter((entry) => entry.kind === 'file' && /\.(?:mp4|mkv)$/i.test(entry.name))
+          .map((entry) => entry.id),
+      ).size,
+    ).toBe(201)
+    expect(job.results).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ action: 'ai-batch', message: expect.stringContaining('1/3') }),
+        expect.objectContaining({ action: 'ai-batch', message: expect.stringContaining('2/3') }),
+        expect.objectContaining({ action: 'ai-batch', message: expect.stringContaining('3/3') }),
+      ]),
+    )
+    const restoreLimitResponse = await fetch(`${backendBaseUrl}/api/settings/ai-rename`, {
+      body: JSON.stringify({ maxVideosPerRequest: 100 }),
+      headers,
+      method: 'PUT',
+    })
+    expect(restoreLimitResponse.status).toBe(200)
+  }, 35_000)
 
   it('renames a numbered movie collection as individual movies instead of TV episodes', async () => {
     const headers = {
@@ -1048,8 +1152,13 @@ describe('AI rename local-storage integration', () => {
           status: 'info',
         }),
         expect.objectContaining({
+          action: 'ai-batch',
+          message: 'AI 分析批次 1/1 已完成：2 个视频',
+          status: 'info',
+        }),
+        expect.objectContaining({
           action: 'inventory',
-          message: 'AI 已一次性返回 1/1 个逻辑媒体组的修改建议，开始按顺序执行',
+          message: 'AI 已分 1 批返回 1/1 个逻辑媒体组的修改建议，开始按顺序执行',
           status: 'info',
         }),
         expect.objectContaining({
@@ -1415,6 +1524,7 @@ describe('AI rename local-storage integration', () => {
     }
     const taskId = 'pre-strm-ai-rename-task'
     const taskName = '生成前整理测试'
+    const inventoryRequestCountBefore = inventoryRequests.length
     const saveResponse = await fetch(`${backendBaseUrl}/api/tasks/${encodeURIComponent(taskId)}`, {
       body: JSON.stringify({
         aiRenameBeforeStrm: true,
@@ -1443,14 +1553,16 @@ describe('AI rename local-storage integration', () => {
       aiRenameInventoryGroups: 1,
       aiRenameStatus: 'completed',
       aiRenameSubmittedGroups: 1,
-      aiRenameSucceeded: 2,
+      aiRenameSucceeded: 3,
       aiRenameUnchangedGroups: 0,
       generated: 1,
       ok: true,
+      subtitlesGenerated: 1,
     })
 
     const renamedDirectoryName = '瑞克和莫蒂 (Rick and Morty) (2013) - Season 07'
     const renamedMediaName = '瑞克和莫蒂 (Rick and Morty) - S07E01.mkv'
+    const renamedSubtitleName = '瑞克和莫蒂 (Rick and Morty) - S07E01.zh-CN.srt'
     const renamedMediaPath = path.join(
       preStrmLibraryDirectory,
       renamedDirectoryName,
@@ -1462,8 +1574,28 @@ describe('AI rename local-storage integration', () => {
       renamedDirectoryName,
       '瑞克和莫蒂 (Rick and Morty) - S07E01.strm',
     )
+    const renamedSubtitlePath = path.join(
+      preStrmLibraryDirectory,
+      renamedDirectoryName,
+      renamedSubtitleName,
+    )
+    const generatedSubtitlePath = path.join(
+      strmOutputDirectory,
+      taskName,
+      renamedDirectoryName,
+      renamedSubtitleName,
+    )
     expect(await readFile(renamedMediaPath, 'utf8')).toBe('pre-strm')
+    expect(await readFile(renamedSubtitlePath, 'utf8')).toBe('pre-strm-subtitle')
     expect((await readFile(generatedStrmPath, 'utf8')).trim()).toBe(renamedMediaPath)
+    expect(await readFile(generatedSubtitlePath, 'utf8')).toBe('pre-strm-subtitle')
+    expect(
+      inventoryRequests
+        .slice(inventoryRequestCountBefore)
+        .flatMap((inventory) => inventory)
+        .flatMap((group) => group.entries)
+        .some((entry) => /\.srt$/i.test(entry.name)),
+    ).toBe(false)
     expect(runResult.task.lastLog.indexOf('>>> 开始生成 STRM 前的 AI 重命名')).toBeLessThan(
       runResult.task.lastLog.indexOf('>>> 开始扫描并生成'),
     )
@@ -1484,6 +1616,8 @@ describe('AI rename local-storage integration', () => {
       aiRenameUnchangedGroups: 1,
       generated: 0,
       skipped: 1,
+      subtitlesGenerated: 0,
+      subtitlesSkipped: 1,
     })
     expect(aiRequestPayloads).toHaveLength(aiRequestCountAfterInitialRun)
     expect(unchangedRunResult.task.lastLog).toContain('本次未调用 AI')

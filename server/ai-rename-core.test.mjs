@@ -4,13 +4,17 @@ import {
   extractMovieVersionLabel,
   formatEpisodeToken,
   formatSeriesTitle,
+  getSubtitleQualifier,
+  isSubtitleFileName,
   isValidRenameBasename,
+  matchSubtitleToMedia,
   normalizeAiClassification,
   parseAiJsonContent,
   renderEpisodeFileName,
   renderFolderName,
   renderMovieFileName,
   renderSidecarFileName,
+  renderSubtitleFileName,
   resolveAiRenameJobStatus,
   sanitizeNameSegment,
 } from './ai-rename-core.mjs'
@@ -146,6 +150,35 @@ describe('AI rename deterministic naming', () => {
       ),
     ).toBe('瑞克和莫蒂 (Rick and Morty) - S06E01.zh-CN.srt')
     expect(renderSidecarFileName(rickAndMorty, { role: 'ignore' }, 'advert.png')).toBe('')
+  })
+
+  it('matches and renames subtitles deterministically without AI metadata', () => {
+    const mediaEntries = [
+      { id: 'episode-1', name: 'Rick.and.Morty.S06E01.1080p.mkv' },
+      { id: 'episode-2', name: 'Rick.and.Morty.S06E02.1080p.mkv' },
+    ]
+    const subtitle = { name: 'Rick.and.Morty.S06E01.1080p.zh-CN.forced.srt' }
+
+    expect(isSubtitleFileName(subtitle.name)).toBe(true)
+    expect(matchSubtitleToMedia(subtitle, mediaEntries)).toBe(mediaEntries[0])
+    expect(getSubtitleQualifier(subtitle.name, mediaEntries[0].name)).toBe('.zh-CN.forced')
+    expect(
+      renderSubtitleFileName(
+        '瑞克和莫蒂 (Rick and Morty) - S06E01.mkv',
+        subtitle.name,
+        mediaEntries[0].name,
+      ),
+    ).toBe('瑞克和莫蒂 (Rick and Morty) - S06E01.zh-CN.forced.srt')
+  })
+
+  it('uses a single video as the safe fallback while preserving known subtitle qualifiers', () => {
+    const media = { id: 'movie', name: 'Whiplash (爆裂鼓手) (2014).mkv' }
+    const subtitle = { name: 'Whiplash (2014 IMDB 8.6 1080p BluRay).zh-HK.srt' }
+
+    expect(matchSubtitleToMedia(subtitle, [media])).toBe(media)
+    expect(
+      renderSubtitleFileName(media.name, subtitle.name, 'Whiplash (2014 IMDB 8.6 1080p).mkv'),
+    ).toBe('Whiplash (爆裂鼓手) (2014).zh-HK.srt')
   })
 
   it('sanitizes unsafe title characters and validates basenames', () => {

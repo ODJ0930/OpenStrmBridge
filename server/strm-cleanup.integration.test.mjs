@@ -61,6 +61,7 @@ describe('STRM stale-file cleanup integration', () => {
   let outputDirectory
   let outputRoot
   let seasonDirectory
+  let sourceSubtitleFile
   let tempDirectory
   const backendOutput = []
   const headers = { 'Content-Type': 'application/json' }
@@ -89,9 +90,11 @@ describe('STRM stale-file cleanup integration', () => {
     outputDirectory = path.join(outputRoot, 'Cleanup Task')
     seasonDirectory = path.join(libraryDirectory, 'Old Show', 'Season 01')
     currentMediaFile = path.join(seasonDirectory, 'Old Name S01E01.mkv')
+    sourceSubtitleFile = path.join(seasonDirectory, 'Old Name S01E01.zh-CN.srt')
     await mkdir(dataDirectory, { recursive: true })
     await mkdir(seasonDirectory, { recursive: true })
     await writeFile(currentMediaFile, 'media')
+    await writeFile(sourceSubtitleFile, 'subtitle')
     await writeFile(
       path.join(dataDirectory, 'settings.json'),
       JSON.stringify({
@@ -166,12 +169,20 @@ describe('STRM stale-file cleanup integration', () => {
     expect(firstRun.result).toMatchObject({ cleanupDeleted: 0, ok: true })
 
     const oldStrmFile = path.join(outputDirectory, 'Old Show', 'Season 01', 'Old Name S01E01.strm')
+    const oldSubtitleFile = path.join(
+      outputDirectory,
+      'Old Show',
+      'Season 01',
+      'Old Name S01E01.zh-CN.srt',
+    )
     expect(await exists(oldStrmFile)).toBe(true)
+    expect(await readFile(oldSubtitleFile, 'utf8')).toBe('subtitle')
 
     const renamedShowDirectory = path.join(libraryDirectory, 'Renamed Show')
     await rename(path.join(libraryDirectory, 'Old Show'), renamedShowDirectory)
     seasonDirectory = path.join(renamedShowDirectory, 'Season 01')
     currentMediaFile = path.join(seasonDirectory, 'New Name S01E01.mkv')
+    sourceSubtitleFile = path.join(seasonDirectory, 'Old Name S01E01.zh-CN.srt')
     await rename(path.join(seasonDirectory, 'Old Name S01E01.mkv'), currentMediaFile)
 
     const secondRun = await runTask()
@@ -181,15 +192,25 @@ describe('STRM stale-file cleanup integration', () => {
       'Season 01',
       'New Name S01E01.strm',
     )
+    const newSubtitleFile = path.join(
+      outputDirectory,
+      'Renamed Show',
+      'Season 01',
+      'New Name S01E01.zh-CN.srt',
+    )
 
     expect(secondRun.result).toMatchObject({
       cleanupDeleted: 1,
       cleanupFailed: 0,
       cleanupSkipped: false,
       ok: true,
+      subtitleCleanupDeleted: 1,
+      subtitlesGenerated: 1,
     })
     expect(await exists(newStrmFile)).toBe(true)
+    expect(await readFile(newSubtitleFile, 'utf8')).toBe('subtitle')
     expect(await exists(oldStrmFile)).toBe(false)
+    expect(await exists(oldSubtitleFile)).toBe(false)
     expect(await exists(path.join(outputDirectory, 'Old Show'))).toBe(false)
 
     const indexEntries = JSON.parse(
@@ -197,6 +218,7 @@ describe('STRM stale-file cleanup integration', () => {
     ).filter((entry) => entry.taskId === taskId)
     expect(indexEntries).toHaveLength(1)
     expect(indexEntries[0].sourcePath).toBe(currentMediaFile)
+    expect(indexEntries[0].subtitleFiles).toEqual([newSubtitleFile])
   }, 20_000)
 
   it('keeps old STRM files when the scan reaches its safety limit', async () => {

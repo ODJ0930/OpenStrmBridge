@@ -130,6 +130,7 @@ export interface AiRenameSettings {
   apiKeyConfigured: boolean
   baseUrl: string
   customParameters: string
+  maxVideosPerRequest: number
   model: string
   namingStyle: AiRenameNamingStyle
   promptTemplate: string
@@ -146,6 +147,7 @@ export interface AiRenameSettingsUpdate {
   clearApiKey?: boolean
   clearTmdbToken?: boolean
   customParameters: string
+  maxVideosPerRequest: number
   model: string
   namingStyle: AiRenameNamingStyle
   promptTemplate: string

@@ -24,7 +24,9 @@ import {
   getRenameExtensionSets,
   isMediaFileName,
   isSidecarFileName,
+  isSubtitleFileName,
   isValidRenameBasename,
+  matchSubtitleToMedia,
   normalizeAiClassification,
   normalizeComparableTitle,
   normalizeNamingStyle,
@@ -34,6 +36,7 @@ import {
   renderFolderName,
   renderMovieFileName,
   renderSidecarFileName,
+  renderSubtitleFileName,
   resolveAiRenameJobStatus,
 } from './ai-rename-core.mjs'
 
@@ -67,7 +70,10 @@ const defaultAiRenamePromptTemplate = [
   '广告图片、网站宣传文件、发布组与画质编码信息应忽略；无法可靠识别的条目不要猜测。',
   '字幕、NFO、海报等附属文件只在能可靠关联视频时标记。',
 ].join('\n')
-const AI_RENAME_LOGICAL_GROUPING_VERSION = 5
+const AI_RENAME_LOGICAL_GROUPING_VERSION = 6
+const AI_RENAME_DEFAULT_MAX_VIDEOS_PER_REQUEST = 100
+const AI_RENAME_MIN_VIDEOS_PER_REQUEST = 1
+const AI_RENAME_MAX_VIDEOS_PER_REQUEST = 1000
 const port = Number.parseInt(process.env.OPENSTRMBRIDGE_BACKEND_PORT ?? '', 10) || DEFAULT_PORT
 const host = process.env.OPENSTRMBRIDGE_BACKEND_HOST?.trim() || '127.0.0.1'
 const dataDir = process.env.OPENSTRMBRIDGE_DATA_DIR ?? path.join(process.cwd(), 'data')
@@ -714,12 +720,23 @@ function normalizeAiRenameSettings(aiRenameSettings = {}) {
   )
 
   const configuredPrompt = String(aiRenameSettings.promptTemplate ?? '').trim()
+  const configuredMaxVideos = Number.parseInt(
+    String(aiRenameSettings.maxVideosPerRequest ?? ''),
+    10,
+  )
+  const maxVideosPerRequest = Number.isFinite(configuredMaxVideos)
+    ? Math.min(
+        AI_RENAME_MAX_VIDEOS_PER_REQUEST,
+        Math.max(AI_RENAME_MIN_VIDEOS_PER_REQUEST, configuredMaxVideos),
+      )
+    : AI_RENAME_DEFAULT_MAX_VIDEOS_PER_REQUEST
 
   return {
     apiKey: String(aiRenameSettings.apiKey ?? '').trim(),
     baseUrl,
     customParameters: formatAiRenameCustomParameters(aiRenameSettings.customParameters),
     model: String(aiRenameSettings.model ?? '').trim(),
+    maxVideosPerRequest,
     namingStyle: normalizeNamingStyle(aiRenameSettings.namingStyle),
     promptTemplate:
       !configuredPrompt ||
@@ -743,6 +760,7 @@ function getAiRenameSettingsForClient(aiRenameSettings = {}) {
     apiKeyConfigured: Boolean(normalized.apiKey),
     baseUrl: normalized.baseUrl,
     customParameters: normalized.customParameters,
+    maxVideosPerRequest: normalized.maxVideosPerRequest,
     model: normalized.model,
     namingStyle: normalized.namingStyle,
     promptTemplate: normalized.promptTemplate,
@@ -1129,6 +1147,16 @@ function normalizeStrmIndexEntry(entry) {
     storageName: String(entry.storageName ?? ''),
     strmEmbyPath: String(entry.strmEmbyPath ?? ''),
     strmFile: path.resolve(String(entry.strmFile ?? '')),
+    subtitleFiles: Array.isArray(entry.subtitleFiles)
+      ? [
+          ...new Set(
+            entry.subtitleFiles
+              .map((file) => String(file ?? '').trim())
+              .filter(Boolean)
+              .map((file) => path.resolve(file)),
+          ),
+        ]
+      : [],
     strmVirtualPath: String(entry.strmVirtualPath ?? ''),
     taskId: String(entry.taskId ?? ''),
     taskName: String(entry.taskName ?? ''),
@@ -3134,26 +3162,29 @@ function createAiRenameInventoryPrompt(
   rootNames,
   additionalInstructions,
   promptTemplate,
+  maxVideosPerRequest = AI_RENAME_DEFAULT_MAX_VIDEOS_PER_REQUEST,
 ) {
   const inventory = groupRecords.map(
     ({ directoryPath, groupEntries, groupId, groupName, inferredSeasonByEntryId, layoutHint }) => ({
       directoryName: getTopEntryForPlan(groupEntries)?.name ?? groupName ?? '当前目录文件',
       directoryPath: getTopEntryForPlan(groupEntries)?.relativePath ?? directoryPath ?? '.',
-      entries: groupEntries.map((entry) => ({
-        depth: entry.depth,
-        eligible: entry.eligible,
-        id: entry.id,
-        inferredRole:
-          entry.depth === 1 && layoutHint === 'series-container'
-            ? 'series-folder'
-            : inferredSeasonByEntryId?.[entry.id] !== undefined
-              ? 'season-folder'
-              : undefined,
-        inferredSeason: inferredSeasonByEntryId?.[entry.id],
-        kind: entry.kind,
-        name: entry.name,
-        relativePath: entry.relativePath,
-      })),
+      entries: groupEntries
+        .filter((entry) => entry.kind !== 'file' || !isSubtitleFileName(entry.name))
+        .map((entry) => ({
+          depth: entry.depth,
+          eligible: entry.eligible,
+          id: entry.id,
+          inferredRole:
+            entry.depth === 1 && layoutHint === 'series-container'
+              ? 'series-folder'
+              : inferredSeasonByEntryId?.[entry.id] !== undefined
+                ? 'season-folder'
+                : undefined,
+          inferredSeason: inferredSeasonByEntryId?.[entry.id],
+          kind: entry.kind,
+          name: entry.name,
+          relativePath: entry.relativePath,
+        })),
       groupId,
       layoutHint,
       mediaHint: inferAiRenameMediaHint(
@@ -3164,7 +3195,7 @@ function createAiRenameInventoryPrompt(
 
   return [
     String(promptTemplate || defaultAiRenamePromptTemplate).trim(),
-    '你是电影与电视剧媒体库命名分析器。下方是一次性汇总的全部逻辑媒体组清单，需要在一次回复中完成所有媒体组的识别。只输出一个 JSON 对象，不要输出 Markdown。',
+    `你是电影与电视剧媒体库命名分析器。下方是当前批次的逻辑媒体组清单，需要在一次回复中完成本批全部媒体组的识别。每次请求最多包含 ${maxVideosPerRequest} 个视频；只输出一个 JSON 对象，不要输出 Markdown。`,
     '不要返回路径或 newName；后端会根据结构化字段生成安全名称。',
     '每组必须返回 mediaType，值只能是 tv、movie、movie-collection。电视剧使用 series；电影的 series 必须为 null，片名和年份写在每个 movie item 中。',
     '输出结构：{"groups":[{"groupId":"输入的 groupId","mediaType":"tv","series":{"titleZh":"简体中文正式名","titleOriginal":"官方或通用英文名","year":2013,"season":1},"items":[...]}]}。',
@@ -3175,7 +3206,7 @@ function createAiRenameInventoryPrompt(
     'episode 项包含 season、episodes（数字数组），可选 version（如 v2）和 part。',
     'movie 项必须包含 titleZh、titleOriginal、year，可选 version（如 v2）、edition 和 part；movie-folder 使用 movieFor 指向对应 movie id。',
     '同一电影存在多个视频文件时，每个 movie 项必须返回相同的正式片名与年份，并用 edition 或 version 提供可读且不同的版本标签，例如 2160p DV HDR、1080p BluRay、Directors Cut；不得把其他版本标记为 ignore。若模型遗漏，后端会从原文件名提取画质、HDR、来源、编码与发布组作为稳定后备标签。',
-    'sidecar 项必须用 sidecarFor 指向对应 episode 或 movie id；字幕可提供 language、forced、hearingImpaired。',
+    '字幕文件不会提交给 AI，后端会直接按其关联视频的最终名称同步处理；不要为字幕虚构 items。其他 sidecar 项必须用 sidecarFor 指向对应 episode 或 movie id。',
     '每个 eligible 文件或文件夹都应返回一项；广告图片、网站宣传图、无法可靠识别项使用 ignore。',
     '顶层单季目录标为 season-folder；包含多个季目录的剧集容器标为 series-folder；子季目录标为 season-folder。',
     'layoutHint 是后端根据完整目录树得到的结构提示：series-container 表示剧集容器，season-folder 表示单季目录，season-folders 表示同剧的多个并列季目录，series-flat 表示平铺剧集，movie-folder 表示电影目录。必须优先遵守 inferredRole 和 inferredSeason。',
@@ -3701,6 +3732,7 @@ async function scanAiRenameLogicalInventory(storage, requestedPath, job, extensi
 
 function createAiRenameGroupFingerprint(groupEntries, groupMetadata = {}) {
   const inventory = groupEntries
+    .filter((entry) => entry.kind !== 'file' || !isSubtitleFileName(entry.name))
     .map((entry) => ({
       eligible: entry.eligible === true,
       kind: entry.kind,
@@ -3749,7 +3781,137 @@ function createAiRenameConfigurationFingerprint(aiSettings, taskOptions = {}) {
     .digest('hex')
 }
 
-async function classifyAiRenameInventory(aiSettings, groupRecords, rootNames, job, extraPrompt) {
+function getAiRenameEntryPathKey(value) {
+  return String(value ?? '')
+    .replaceAll('\\', '/')
+    .replace(/\/+$/g, '')
+    .toLocaleLowerCase()
+}
+
+function isAiRenameEntryAncestor(folderEntry, childEntry) {
+  const folderPath = getAiRenameEntryPathKey(folderEntry.path)
+  const childPath = getAiRenameEntryPathKey(childEntry.path)
+  return Boolean(folderPath && childPath.startsWith(`${folderPath}/`))
+}
+
+function splitAiRenameGroupForRequests(
+  groupRecord,
+  extensionSets,
+  maxVideosPerRequest = AI_RENAME_DEFAULT_MAX_VIDEOS_PER_REQUEST,
+) {
+  const videoEntries = groupRecord.groupEntries.filter(
+    (entry) => entry.kind === 'file' && isMediaFileName(entry.name, extensionSets),
+  )
+
+  if (videoEntries.length <= maxVideosPerRequest) {
+    return [{ originalGroupId: groupRecord.groupId, record: groupRecord, videoEntries }]
+  }
+
+  const folderEntries = groupRecord.groupEntries.filter((entry) => entry.kind === 'folder')
+  const videoEntrySet = new Set(videoEntries)
+  const otherEntries = groupRecord.groupEntries.filter(
+    (entry) =>
+      entry.kind !== 'folder' && !videoEntrySet.has(entry) && !isSubtitleFileName(entry.name),
+  )
+  const chunks = []
+
+  for (let offset = 0; offset < videoEntries.length; offset += maxVideosPerRequest) {
+    const chunkVideos = videoEntries.slice(offset, offset + maxVideosPerRequest)
+    chunks.push({ entries: [...chunkVideos], videos: chunkVideos })
+  }
+
+  for (const [index, entry] of otherEntries.entries()) {
+    const entryParent = getAiRenameEntryPathKey(entry.parentPath)
+    const entryStem = normalizeComparableTitle(path.parse(String(entry.name ?? '')).name)
+    let targetChunkIndex = -1
+
+    for (const [chunkIndex, chunk] of chunks.entries()) {
+      const hasRelatedVideo = chunk.videos.some((video) => {
+        if (getAiRenameEntryPathKey(video.parentPath) !== entryParent) {
+          return false
+        }
+
+        const videoStem = normalizeComparableTitle(path.parse(String(video.name ?? '')).name)
+        return Boolean(
+          entryStem &&
+          videoStem &&
+          (entryStem.startsWith(videoStem) || videoStem.startsWith(entryStem)),
+        )
+      })
+
+      if (hasRelatedVideo) {
+        targetChunkIndex = chunkIndex
+        break
+      }
+    }
+
+    chunks[targetChunkIndex >= 0 ? targetChunkIndex : index % chunks.length].entries.push(entry)
+  }
+
+  return chunks.map((chunk, index) => {
+    const relevantFolders = folderEntries.filter(
+      (folder) =>
+        folder.depth === 1 || chunk.entries.some((entry) => isAiRenameEntryAncestor(folder, entry)),
+    )
+    const groupId = `${groupRecord.groupId}--batch-${index + 1}`
+
+    return {
+      originalGroupId: groupRecord.groupId,
+      record: {
+        ...groupRecord,
+        groupEntries: [...relevantFolders, ...chunk.entries],
+        groupId,
+      },
+      videoEntries: chunk.videos,
+    }
+  })
+}
+
+function createAiRenameRequestPlan(
+  groupRecords,
+  extensionSets,
+  maxVideosPerRequest = AI_RENAME_DEFAULT_MAX_VIDEOS_PER_REQUEST,
+) {
+  const requestGroups = groupRecords.flatMap((record) =>
+    splitAiRenameGroupForRequests(record, extensionSets, maxVideosPerRequest),
+  )
+  const batches = []
+  let currentBatch = []
+  let currentVideoCount = 0
+
+  for (const requestGroup of requestGroups) {
+    const videoCount = requestGroup.videoEntries.length
+
+    if (currentBatch.length > 0 && currentVideoCount + videoCount > maxVideosPerRequest) {
+      batches.push(currentBatch)
+      currentBatch = []
+      currentVideoCount = 0
+    }
+
+    currentBatch.push(requestGroup)
+    currentVideoCount += videoCount
+  }
+
+  if (currentBatch.length > 0) {
+    batches.push(currentBatch)
+  }
+
+  return {
+    batches,
+    maxVideosPerRequest,
+    requestGroups,
+    videoCount: requestGroups.reduce((total, group) => total + group.videoEntries.length, 0),
+  }
+}
+
+async function classifyAiRenameInventoryBatch(
+  aiSettings,
+  groupRecords,
+  rootNames,
+  job,
+  extraPrompt,
+  maxVideosPerRequest,
+) {
   const content = await requestAiChatCompletion(
     aiSettings,
     [
@@ -3764,6 +3926,7 @@ async function classifyAiRenameInventory(aiSettings, groupRecords, rootNames, jo
           rootNames,
           extraPrompt,
           aiSettings.promptTemplate,
+          maxVideosPerRequest,
         ),
         role: 'user',
       },
@@ -3796,6 +3959,122 @@ async function classifyAiRenameInventory(aiSettings, groupRecords, rootNames, jo
   }
 
   return suggestions
+}
+
+function mergeAiRenameBatchSuggestions(groupRecords, requestPlan, suggestionsByRequestGroup) {
+  const chunksByOriginalGroup = new Map()
+
+  for (const requestGroup of requestPlan.requestGroups) {
+    const chunks = chunksByOriginalGroup.get(requestGroup.originalGroupId) ?? []
+    chunks.push({
+      requestGroup,
+      suggestion: suggestionsByRequestGroup.get(requestGroup.record.groupId),
+    })
+    chunksByOriginalGroup.set(requestGroup.originalGroupId, chunks)
+  }
+
+  const mergedSuggestions = new Map()
+
+  for (const groupRecord of groupRecords) {
+    const chunks = chunksByOriginalGroup.get(groupRecord.groupId) ?? []
+    const failedChunk = chunks.find(({ requestGroup, suggestion }) => {
+      return !suggestion?.payload || suggestion.error || !requestGroup
+    })
+
+    if (failedChunk) {
+      mergedSuggestions.set(groupRecord.groupId, {
+        error:
+          failedChunk.suggestion?.error ||
+          `AI 未返回媒体组 ${failedChunk.requestGroup.record.groupId} 的分批结果`,
+      })
+      continue
+    }
+
+    const payloads = chunks.map(({ suggestion }) => suggestion.payload)
+    const mediaTypes = payloads
+      .map((payload) => String(payload.mediaType ?? payload.type ?? '').trim())
+      .filter(Boolean)
+    const uniqueMediaTypes = new Set(mediaTypes)
+
+    if (uniqueMediaTypes.size > 1) {
+      mergedSuggestions.set(groupRecord.groupId, {
+        error: `AI 对媒体组 ${groupRecord.groupId} 的分批类型判断不一致`,
+      })
+      continue
+    }
+
+    const itemsById = new Map()
+
+    for (const payload of payloads) {
+      for (const item of Array.isArray(payload.items) ? payload.items : []) {
+        const id = String(item?.id ?? '').trim()
+
+        if (id && !itemsById.has(id)) {
+          itemsById.set(id, item)
+        }
+      }
+    }
+
+    const series = payloads
+      .map((payload) => payload.series)
+      .find((candidate) => candidate && typeof candidate === 'object')
+
+    mergedSuggestions.set(groupRecord.groupId, {
+      payload: {
+        groupId: groupRecord.groupId,
+        items: [...itemsById.values()],
+        mediaType: mediaTypes[0],
+        series: series ?? null,
+      },
+    })
+  }
+
+  return mergedSuggestions
+}
+
+async function classifyAiRenameInventory(
+  aiSettings,
+  groupRecords,
+  rootNames,
+  job,
+  extraPrompt,
+  requestPlan,
+) {
+  const suggestionsByRequestGroup = new Map()
+
+  for (const [batchIndex, batch] of requestPlan.batches.entries()) {
+    throwIfAiRenameCancelled(job)
+    setAiRenameJobStage(
+      job,
+      'analyzing',
+      `正在提交 AI 分析批次 ${batchIndex + 1}/${requestPlan.batches.length}（最多 ${requestPlan.maxVideosPerRequest} 个视频）`,
+    )
+    const batchSuggestions = await classifyAiRenameInventoryBatch(
+      aiSettings,
+      batch.map((item) => item.record),
+      rootNames,
+      job,
+      extraPrompt,
+      requestPlan.maxVideosPerRequest,
+    )
+
+    for (const requestGroup of batch) {
+      const suggestion = batchSuggestions.get(requestGroup.record.groupId)
+
+      if (suggestion) {
+        suggestionsByRequestGroup.set(requestGroup.record.groupId, suggestion)
+      }
+    }
+
+    appendAiRenameJobResult(job, {
+      action: 'ai-batch',
+      message: `AI 分析批次 ${batchIndex + 1}/${requestPlan.batches.length} 已完成：${batch.reduce((total, item) => total + item.videoEntries.length, 0)} 个视频`,
+      oldPath: job.path,
+      status: 'info',
+    })
+  }
+
+  return mergeAiRenameBatchSuggestions(groupRecords, requestPlan, suggestionsByRequestGroup)
 }
 
 async function verifySeriesWithTmdb(series, aiSettings, job) {
@@ -4135,6 +4414,10 @@ function buildAiRenameGroupPlan(groupRecord, classification, extensionSets, oper
       continue
     }
 
+    if (isSubtitleFileName(entry.name)) {
+      continue
+    }
+
     const newName = renderSidecarFileName(
       classification.series,
       { ...item, season: item.season ?? classification.series.season },
@@ -4158,6 +4441,52 @@ function buildAiRenameGroupPlan(groupRecord, classification, extensionSets, oper
         type: 'rename',
       })
     }
+  }
+
+  const mediaEntries = [...mediaNamesById.keys()]
+    .map((entryId) => entryById.get(entryId))
+    .filter(Boolean)
+
+  for (const entry of groupEntries) {
+    if (entry.kind !== 'file' || !isSubtitleFileName(entry.name)) {
+      continue
+    }
+
+    const entryParent = getAiRenameEntryPathKey(entry.parentPath)
+    const directoryMediaEntries = mediaEntries.filter((mediaEntry) => {
+      return getAiRenameEntryPathKey(mediaEntry.parentPath) === entryParent
+    })
+    const linkedMedia = matchSubtitleToMedia(entry, directoryMediaEntries)
+    const linkedItem = linkedMedia ? itemById.get(linkedMedia.id) : undefined
+    const targetMediaName = linkedMedia ? mediaNamesById.get(linkedMedia.id) : ''
+    const newName =
+      linkedMedia && targetMediaName
+        ? renderSubtitleFileName(targetMediaName, entry.name, linkedMedia.name)
+        : ''
+
+    if (!linkedMedia || !linkedItem || !newName || !isValidRenameBasename(newName)) {
+      continue
+    }
+
+    itemById.set(entry.id, {
+      id: entry.id,
+      role: 'sidecar',
+      season: linkedItem.season ?? classification.series.season,
+      sidecarFor: linkedMedia.id,
+    })
+    operations.push({
+      depth: entry.depth,
+      entryId: entry.id,
+      kind: 'file',
+      movieFolderName:
+        !isTelevision && linkedItem.role === 'movie'
+          ? formatSeriesTitle({ ...linkedItem, namingStyle: classification.namingStyle }, true)
+          : '',
+      newName,
+      oldName: entry.name,
+      sourcePath: entry.path,
+      type: 'subtitle-rename',
+    })
   }
 
   for (const item of classifiedItems) {
@@ -4888,18 +5217,27 @@ async function runAiRenameJob(job, payload) {
 
     if (groupRecords.length > 0) {
       const inventoryEntryCount = groupRecords.reduce(
-        (total, record) => total + record.groupEntries.length,
+        (total, record) =>
+          total +
+          record.groupEntries.filter(
+            (entry) => entry.kind !== 'file' || !isSubtitleFileName(entry.name),
+          ).length,
         0,
+      )
+      const requestPlan = createAiRenameRequestPlan(
+        groupRecords,
+        extensionSets,
+        aiSettings.maxVideosPerRequest,
       )
       job.currentPath = operationRoot
       setAiRenameJobStage(
         job,
         'analyzing',
-        `正在一次性提交 ${groupRecords.length} 个逻辑媒体组给 AI 识别`,
+        `准备分 ${requestPlan.batches.length} 批提交 ${groupRecords.length} 个逻辑媒体组给 AI 识别`,
       )
       appendAiRenameJobResult(job, {
         action: 'inventory',
-        message: `已汇总 ${groupRecords.length} 个逻辑媒体组、${inventoryEntryCount} 个条目，正在进行一次性 AI 识别`,
+        message: `已汇总 ${groupRecords.length} 个逻辑媒体组、${inventoryEntryCount} 个条目、${requestPlan.videoCount} 个视频，将分 ${requestPlan.batches.length} 批顺序提交 AI；每批最多 ${requestPlan.maxVideosPerRequest} 个视频`,
         oldPath: operationRoot,
         status: 'info',
       })
@@ -4909,11 +5247,12 @@ async function runAiRenameJob(job, payload) {
         rootNames,
         job,
         String(payload.extraPrompt ?? '').trim(),
+        requestPlan,
       )
       throwIfAiRenameCancelled(job)
       appendAiRenameJobResult(job, {
         action: 'inventory',
-        message: `AI 已一次性返回 ${suggestionsByGroup.size}/${groupRecords.length} 个逻辑媒体组的修改建议，开始按顺序执行`,
+        message: `AI 已分 ${requestPlan.batches.length} 批返回 ${suggestionsByGroup.size}/${groupRecords.length} 个逻辑媒体组的修改建议，开始按顺序执行`,
         oldPath: operationRoot,
         status: 'info',
       })
@@ -7161,6 +7500,16 @@ function getOutputFilePath(outputDirectory, relativePath) {
   return path.join(outputDirectory, ...segments, `${baseName}.strm`)
 }
 
+function getOutputSubtitleFilePath(strmFile, mediaEntry, subtitleEntry) {
+  const subtitleName = renderSubtitleFileName(
+    path.basename(strmFile),
+    subtitleEntry?.name,
+    mediaEntry?.name,
+  )
+
+  return subtitleName ? path.join(path.dirname(strmFile), subtitleName) : ''
+}
+
 function toPosixPath(value) {
   return String(value ?? '').replace(/\\/g, '/')
 }
@@ -7202,6 +7551,7 @@ function createStrmIndexEntry(
     storageName: storage.name,
     strmEmbyPath: joinPosixPath(getTaskOutputEmbyPath(task.name, settings), strmRelativePath),
     strmFile: outputFile,
+    subtitleFiles: [],
     strmVirtualPath: joinPosixPath(
       getTaskOutputVirtualPath(task.name, strmSettings.outputRoot),
       strmRelativePath,
@@ -7434,6 +7784,58 @@ async function createStrmTargetUrl(storage, entryPath, context = {}) {
   return createStrmUrl(storage, entryPath, context)
 }
 
+async function readStorageFileBuffer(storage, entryPath, context = {}) {
+  if (storage.accessMethod === 'local') {
+    return readFile(path.resolve(entryPath))
+  }
+
+  const requestUrl =
+    storage.accessMethod === 'webdav'
+      ? joinEndpointAndPath(storage.endpoint, entryPath)
+      : await createStrmUrl(storage, entryPath, context)
+  const response = await fetch(requestUrl, {
+    headers: storage.accessMethod === 'webdav' ? getWebDavAuthHeaders(storage) : undefined,
+  })
+
+  if (!response.ok) {
+    throw new Error(`读取字幕文件失败: HTTP ${response.status}`)
+  }
+
+  return Buffer.from(await response.arrayBuffer())
+}
+
+async function syncSubtitleForEntry({
+  mediaEntry,
+  mediaResult,
+  storage,
+  strmUrlContext,
+  subtitleEntry,
+  task,
+}) {
+  const outputFile = getOutputSubtitleFilePath(mediaResult.outputFile, mediaEntry, subtitleEntry)
+
+  if (!outputFile || !isValidRenameBasename(path.basename(outputFile))) {
+    throw new Error('无法根据 STRM 名称生成安全的字幕文件名')
+  }
+
+  const content = await readStorageFileBuffer(storage, subtitleEntry.path, strmUrlContext)
+
+  if (task.incremental && (await pathExists(outputFile))) {
+    const currentContent = await readFile(outputFile)
+
+    if (currentContent.equals(content)) {
+      mediaResult.indexEntry.subtitleFiles.push(outputFile)
+      return { outputFile, status: 'skipped' }
+    }
+  }
+
+  await mkdir(path.dirname(outputFile), { recursive: true })
+  await writeFile(outputFile, content)
+
+  mediaResult.indexEntry.subtitleFiles.push(outputFile)
+  return { outputFile, status: 'generated' }
+}
+
 async function generateStrmForEntry({
   entry,
   outputDirectory,
@@ -7466,6 +7868,7 @@ async function generateStrmForEntry({
       strmIndexEntries.push(indexEntry)
 
       return {
+        indexEntry,
         outputFile,
         relativeOutputFile,
         status: 'skipped',
@@ -7478,6 +7881,7 @@ async function generateStrmForEntry({
   strmIndexEntries.push(indexEntry)
 
   return {
+    indexEntry,
     outputFile,
     relativeOutputFile,
     status: 'generated',
@@ -7531,6 +7935,106 @@ async function pruneEmptyStrmDirectories(directoryPaths, outputDirectory, logLin
   }
 
   return removed
+}
+
+function getIndexedSubtitleFiles(entry) {
+  return Array.isArray(entry?.subtitleFiles)
+    ? entry.subtitleFiles
+        .map((file) => String(file ?? '').trim())
+        .filter(Boolean)
+        .map((file) => path.resolve(file))
+    : []
+}
+
+async function cleanupStaleSubtitleFiles({
+  currentIndexEntries,
+  logLines,
+  outputDirectory,
+  previousIndexEntries,
+  task,
+}) {
+  const resolvedOutputDirectory = path.resolve(outputDirectory)
+  const currentFiles = new Set(
+    currentIndexEntries
+      .flatMap((entry) => getIndexedSubtitleFiles(entry))
+      .map(getResolvedLocalPathKey),
+  )
+  const previousTaskFiles = new Map()
+  const otherTaskFiles = new Set()
+
+  for (const entry of previousIndexEntries) {
+    const target =
+      String(entry?.taskId ?? '') === String(task.id) ? previousTaskFiles : otherTaskFiles
+
+    for (const subtitleFile of getIndexedSubtitleFiles(entry)) {
+      const fileKey = getResolvedLocalPathKey(subtitleFile)
+
+      if (target instanceof Map) {
+        target.set(fileKey, subtitleFile)
+      } else {
+        target.add(fileKey)
+      }
+    }
+  }
+
+  const staleFiles = [...previousTaskFiles.entries()].filter(
+    ([fileKey]) => !currentFiles.has(fileKey),
+  )
+  const affectedDirectories = new Set()
+  let deleted = 0
+  let detached = 0
+  let failed = 0
+  let missing = 0
+  let shared = 0
+
+  for (const [fileKey, subtitleFile] of staleFiles) {
+    const relativeFile = path.relative(resolvedOutputDirectory, subtitleFile)
+    const isSafeTaskFile =
+      subtitleFile !== resolvedOutputDirectory &&
+      isLocalPathInside(subtitleFile, resolvedOutputDirectory) &&
+      isSubtitleFileName(subtitleFile)
+
+    if (otherTaskFiles.has(fileKey)) {
+      shared += 1
+      logLines.push(`保留其他任务仍在引用的字幕: ${relativeFile}`)
+      continue
+    }
+
+    if (!isSafeTaskFile) {
+      detached += 1
+      logLines.push(`已移除历史或越界字幕索引（未删除磁盘文件）: ${subtitleFile}`)
+      continue
+    }
+
+    try {
+      await unlink(subtitleFile)
+      deleted += 1
+      affectedDirectories.add(path.dirname(subtitleFile))
+      logLines.push(`已删除失效字幕: ${relativeFile}`)
+    } catch (error) {
+      if (error?.code === 'ENOENT') {
+        missing += 1
+        affectedDirectories.add(path.dirname(subtitleFile))
+        continue
+      }
+
+      failed += 1
+      logLines.push(`删除失效字幕失败: ${relativeFile} - ${getErrorMessage(error)}`)
+    }
+  }
+
+  return {
+    deleted,
+    detached,
+    failed,
+    missing,
+    removedDirectories:
+      staleFiles.length > 0
+        ? await pruneEmptyStrmDirectories(affectedDirectories, outputDirectory, logLines)
+        : 0,
+    shared,
+    stale: staleFiles.length,
+  }
 }
 
 async function cleanupStaleStrmFiles({
@@ -7660,6 +8164,7 @@ async function scanAndGenerateStrmEntries({
   const scanThreadCount = normalizeStrmThreadCount(strmSettings?.threadCount)
   const strmIndexEntries = []
   const strmUrlContext = {}
+  const claimedSubtitleFiles = new Set()
   const waiters = []
   let activeDirectories = 0
   let claimedDirectories = 0
@@ -7669,6 +8174,11 @@ async function scanAndGenerateStrmEntries({
   let generated = 0
   let skipped = 0
   let failed = 0
+  let subtitleFiles = 0
+  let subtitlesGenerated = 0
+  let subtitlesSkipped = 0
+  let subtitlesFailed = 0
+  let subtitlesUnmatched = 0
 
   logLines.push('>>> 开始扫描并生成')
 
@@ -7732,9 +8242,12 @@ async function scanAndGenerateStrmEntries({
         generated += 1
         logLines.push(`生成成功: ${result.relativeOutputFile}`)
       }
+
+      return result
     } catch (error) {
       failed += 1
       logLines.push(`生成失败: ${entry.path} - ${getErrorMessage(error)}`)
+      return undefined
     }
   }
 
@@ -7749,6 +8262,7 @@ async function scanAndGenerateStrmEntries({
       try {
         const result = await listAllStorageEntries(storage, currentPath)
         const mediaEntries = []
+        const subtitleEntries = []
         scannedDirectories += 1
         logLines.push(`读取目录: ${result.path}`)
 
@@ -7757,17 +8271,86 @@ async function scanAndGenerateStrmEntries({
             pendingDirectories.push(entry.path)
           } else if (isMediaEntry(entry, strmSettings)) {
             mediaEntries.push(entry)
+          } else if (isSubtitleFileName(entry.name)) {
+            subtitleEntries.push(entry)
           }
         }
 
         wakeWorkers()
+
+        const mediaResults = new Map()
 
         for (const entry of mediaEntries) {
           if (mediaFiles >= scanLimits.mediaFiles) {
             break
           }
 
-          await generateMediaEntry(entry)
+          const mediaResult = await generateMediaEntry(entry)
+
+          if (mediaResult) {
+            mediaResults.set(entry.path, mediaResult)
+          }
+        }
+
+        for (const subtitleEntry of subtitleEntries) {
+          subtitleFiles += 1
+          const linkedMedia = matchSubtitleToMedia(
+            subtitleEntry,
+            mediaEntries.filter((entry) => mediaResults.has(entry.path)),
+          )
+          const mediaResult = linkedMedia ? mediaResults.get(linkedMedia.path) : undefined
+
+          if (!linkedMedia || !mediaResult) {
+            subtitlesUnmatched += 1
+            logLines.push(`跳过未匹配字幕: ${subtitleEntry.path}`)
+            continue
+          }
+
+          const outputFile = getOutputSubtitleFilePath(
+            mediaResult.outputFile,
+            linkedMedia,
+            subtitleEntry,
+          )
+          const outputFileKey = outputFile ? getResolvedLocalPathKey(outputFile) : ''
+
+          if (!outputFileKey || claimedSubtitleFiles.has(outputFileKey)) {
+            subtitlesUnmatched += 1
+            logLines.push(
+              `跳过字幕名称冲突: ${subtitleEntry.path}${outputFile ? ` -> ${outputFile}` : ''}`,
+            )
+            continue
+          }
+
+          claimedSubtitleFiles.add(outputFileKey)
+
+          try {
+            const subtitleResult = await syncSubtitleForEntry({
+              mediaEntry: linkedMedia,
+              mediaResult,
+              storage,
+              strmUrlContext,
+              subtitleEntry,
+              task,
+            })
+            const relativeSubtitleFile = path.relative(outputDirectory, subtitleResult.outputFile)
+
+            if (subtitleResult.status === 'skipped') {
+              subtitlesSkipped += 1
+              logLines.push(`跳过未变化字幕: ${relativeSubtitleFile}`)
+            } else {
+              subtitlesGenerated += 1
+              logLines.push(`字幕同步成功: ${relativeSubtitleFile}`)
+            }
+          } catch (error) {
+            failed += 1
+            subtitlesFailed += 1
+
+            if (outputFile && (await pathExists(outputFile))) {
+              mediaResult.indexEntry.subtitleFiles.push(outputFile)
+            }
+
+            logLines.push(`字幕同步失败: ${subtitleEntry.path} - ${getErrorMessage(error)}`)
+          }
         }
       } catch (error) {
         failedDirectories += 1
@@ -7801,6 +8384,11 @@ async function scanAndGenerateStrmEntries({
     scannedDirectories,
     skipped,
     strmIndexEntries,
+    subtitleFiles,
+    subtitlesFailed,
+    subtitlesGenerated,
+    subtitlesSkipped,
+    subtitlesUnmatched,
   }
 }
 
@@ -8042,6 +8630,11 @@ async function executeTask(task, storage, strmSettings, settings = {}) {
     scannedDirectories,
     skipped,
     strmIndexEntries,
+    subtitleFiles,
+    subtitlesFailed,
+    subtitlesGenerated,
+    subtitlesSkipped,
+    subtitlesUnmatched,
   } = await scanAndGenerateStrmEntries({
     logLines,
     outputDirectory,
@@ -8058,6 +8651,11 @@ async function executeTask(task, storage, strmSettings, settings = {}) {
   let cleanupRemovedDirectories = 0
   let cleanupShared = 0
   let cleanupSkipped = false
+  let subtitleCleanupDeleted = 0
+  let subtitleCleanupDetached = 0
+  let subtitleCleanupFailed = 0
+  let subtitleCleanupMissing = 0
+  let subtitleCleanupShared = 0
 
   if (
     previousIndexAvailable &&
@@ -8077,6 +8675,21 @@ async function executeTask(task, storage, strmSettings, settings = {}) {
     previousIndexAvailable && failed === 0 && failedDirectories === 0 && scanLimitReached !== true
 
   if (cleanupAllowed) {
+    const subtitleCleanupResult = await cleanupStaleSubtitleFiles({
+      currentIndexEntries: strmIndexEntries,
+      logLines,
+      outputDirectory,
+      previousIndexEntries,
+      task,
+    })
+    subtitleCleanupDeleted = subtitleCleanupResult.deleted
+    subtitleCleanupDetached = subtitleCleanupResult.detached
+    subtitleCleanupFailed = subtitleCleanupResult.failed
+    subtitleCleanupMissing = subtitleCleanupResult.missing
+    subtitleCleanupShared = subtitleCleanupResult.shared
+    cleanupRemovedDirectories += subtitleCleanupResult.removedDirectories
+    failed += subtitleCleanupFailed
+
     const cleanupResult = await cleanupStaleStrmFiles({
       currentIndexEntries: strmIndexEntries,
       logLines,
@@ -8088,7 +8701,7 @@ async function executeTask(task, storage, strmSettings, settings = {}) {
     cleanupDetached = cleanupResult.detached
     cleanupFailed = cleanupResult.failed
     cleanupMissing = cleanupResult.missing
-    cleanupRemovedDirectories = cleanupResult.removedDirectories
+    cleanupRemovedDirectories += cleanupResult.removedDirectories
     cleanupShared = cleanupResult.shared
     failed += cleanupFailed
 
@@ -8138,7 +8751,7 @@ async function executeTask(task, storage, strmSettings, settings = {}) {
   const partial = status === 'partial'
 
   logLines.push(
-    `生成完成，共发现 ${mediaFiles} 个媒体文件，生成 ${generated} 个，跳过 ${skipped} 个，失败 ${failed} 个，目录读取失败 ${failedDirectories} 个，清理失效 STRM ${cleanupDeleted} 个。`,
+    `生成完成，共发现 ${mediaFiles} 个媒体文件，生成 ${generated} 个，跳过 ${skipped} 个，失败 ${failed} 个；发现字幕 ${subtitleFiles} 个，同步 ${subtitlesGenerated} 个，跳过未变化 ${subtitlesSkipped} 个，未匹配 ${subtitlesUnmatched} 个，字幕失败 ${subtitlesFailed} 个；目录读取失败 ${failedDirectories} 个，清理失效 STRM ${cleanupDeleted} 个、字幕 ${subtitleCleanupDeleted} 个。`,
   )
   logLines.push(`${formatLocalDateTime(finishedAt)} 任务完成`)
   logLines.finish(status)
@@ -8173,6 +8786,16 @@ async function executeTask(task, storage, strmSettings, settings = {}) {
       skipped,
       startedAt: startedAt.toISOString(),
       status,
+      subtitleCleanupDeleted,
+      subtitleCleanupDetached,
+      subtitleCleanupFailed,
+      subtitleCleanupMissing,
+      subtitleCleanupShared,
+      subtitleFiles,
+      subtitlesFailed,
+      subtitlesGenerated,
+      subtitlesSkipped,
+      subtitlesUnmatched,
     },
   }
 }

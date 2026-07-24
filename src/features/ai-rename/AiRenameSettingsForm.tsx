@@ -7,6 +7,7 @@ import {
   Checkbox,
   Form,
   Input,
+  InputNumber,
   Select,
   Switch,
   Tag,
@@ -112,6 +113,7 @@ export function AiRenameSettingsForm() {
           clearApiKey: false,
           clearTmdbToken: false,
           customParameters: settings.aiRename.customParameters,
+          maxVideosPerRequest: settings.aiRename.maxVideosPerRequest,
           model: settings.aiRename.model,
           namingStyle: settings.aiRename.namingStyle,
           promptTemplate: settings.aiRename.promptTemplate,
@@ -145,6 +147,7 @@ export function AiRenameSettingsForm() {
       apiKey: values.apiKey?.trim() || undefined,
       baseUrl: values.baseUrl?.trim() || configured.baseUrl,
       customParameters: values.customParameters?.trim() || '{}',
+      maxVideosPerRequest: values.maxVideosPerRequest ?? configured.maxVideosPerRequest,
       model: values.model?.trim() || configured.model,
       promptTemplate: values.promptTemplate.trim(),
       tmdbBaseUrl: values.tmdbBaseUrl?.trim() || configured.tmdbBaseUrl,
@@ -342,6 +345,26 @@ export function AiRenameSettingsForm() {
               }
               rows={6}
               showCount
+            />
+          </Form.Item>
+
+          <Form.Item
+            extra="每次提交给 AI 的视频数量上限。超过上限时会按批次顺序处理；建议根据模型上下文容量设置为 20–100。"
+            label="单次 AI 请求视频上限"
+            name="maxVideosPerRequest"
+            rules={[
+              { required: true, message: '请输入单次 AI 请求视频上限' },
+              { type: 'number', min: 1, max: 1000, message: '上限必须是 1–1000 之间的整数' },
+            ]}
+          >
+            <InputNumber
+              aria-label="单次 AI 请求视频上限"
+              className="ai-rename-number-input"
+              max={1000}
+              min={1}
+              precision={0}
+              placeholder="100"
+              style={{ width: '100%' }}
             />
           </Form.Item>
 

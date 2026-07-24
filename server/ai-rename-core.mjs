@@ -48,6 +48,8 @@ export const defaultSidecarExtensions = [
   'vtt',
 ]
 
+export const defaultSubtitleExtensions = ['ass', 'ssa', 'srt', 'sub', 'vtt']
+
 function parseExtensionList(value, defaults) {
   const values = String(value ?? '')
     .split(',')
@@ -77,6 +79,10 @@ export function isMediaFileName(fileName, extensionSets) {
 
 export function isSidecarFileName(fileName, extensionSets) {
   return extensionSets.sidecar.has(getLowerExtension(fileName))
+}
+
+export function isSubtitleFileName(fileName) {
+  return defaultSubtitleExtensions.includes(getLowerExtension(fileName))
 }
 
 export function sanitizeNameSegment(value) {
@@ -392,6 +398,133 @@ export function renderSidecarFileName(series, item, originalName, mediaNamesById
   }
 
   return ''
+}
+
+function getFileStem(fileName) {
+  const parsed = path.posix.parse(String(fileName ?? '').replaceAll('\\', '/'))
+  return parsed.name
+}
+
+function normalizeFileStem(fileName) {
+  return getFileStem(fileName).normalize('NFKC').toLocaleLowerCase()
+}
+
+function isSubtitleQualifierToken(value) {
+  return /^(?:zh(?:[-_](?:cn|tw|hk|sg|hans|hant))?|zho|chi|chs|cht|sc|tc|cn|简体|繁体|简中|繁中|中字|双语|中英|en|eng|english|ja|jpn|jp|japanese|ko|kor|kr|korean|forced|foreign|default|sdh|hi|cc)$/i.test(
+    String(value ?? '').trim(),
+  )
+}
+
+function getTrailingSubtitleQualifier(subtitleStem) {
+  const parts = String(subtitleStem ?? '').split('.')
+  let qualifierStart = parts.length
+
+  while (qualifierStart > 0 && isSubtitleQualifierToken(parts[qualifierStart - 1])) {
+    qualifierStart -= 1
+  }
+
+  return qualifierStart < parts.length ? parts.slice(qualifierStart).join('.') : ''
+}
+
+function normalizeSubtitleQualifier(value) {
+  const qualifier = sanitizeNameSegment(value)
+    .replace(/^[\s._-]+/g, '')
+    .replace(/\s+/g, '-')
+
+  return qualifier ? `.${qualifier}` : ''
+}
+
+export function getSubtitleQualifier(subtitleName, mediaName) {
+  const subtitleStem = getFileStem(subtitleName)
+  const mediaStem = getFileStem(mediaName)
+  const normalizedSubtitleStem = subtitleStem.normalize('NFKC').toLocaleLowerCase()
+  const normalizedMediaStem = mediaStem.normalize('NFKC').toLocaleLowerCase()
+
+  if (normalizedSubtitleStem === normalizedMediaStem) {
+    return ''
+  }
+
+  if (
+    normalizedMediaStem &&
+    normalizedSubtitleStem.startsWith(normalizedMediaStem) &&
+    /^[\s._\-[({（【]/.test(subtitleStem.slice(mediaStem.length))
+  ) {
+    return normalizeSubtitleQualifier(subtitleStem.slice(mediaStem.length))
+  }
+
+  return normalizeSubtitleQualifier(getTrailingSubtitleQualifier(subtitleStem))
+}
+
+function getEpisodeIdentity(value) {
+  const stem = getFileStem(value).normalize('NFKC')
+  const seasonEpisode = stem.match(/\bS(\d{1,3})[.\s_-]*E(\d{1,4}(?:[.\s_-]*(?:-|E)\s*\d{1,4})*)/i)
+
+  if (seasonEpisode) {
+    return `s${Number.parseInt(seasonEpisode[1], 10)}e${seasonEpisode[2]
+      .replace(/\D+/g, ',')
+      .replace(/^,|,$/g, '')}`
+  }
+
+  const episode = stem.match(/(?:^|[.\s_-])E(?:P)?[.\s_-]*(\d{1,4})(?:$|[.\s_-])/i)
+  return episode ? `e${Number.parseInt(episode[1], 10)}` : ''
+}
+
+export function matchSubtitleToMedia(subtitleEntry, mediaEntries = []) {
+  const candidates = mediaEntries.filter((entry) => entry?.name)
+
+  if (!subtitleEntry?.name || candidates.length === 0) {
+    return undefined
+  }
+
+  const subtitleStem = normalizeFileStem(subtitleEntry.name)
+  const subtitleComparable = normalizeComparableTitle(getFileStem(subtitleEntry.name))
+  const subtitleEpisode = getEpisodeIdentity(subtitleEntry.name)
+  const ranked = candidates
+    .map((entry) => {
+      const mediaStem = normalizeFileStem(entry.name)
+      const mediaComparable = normalizeComparableTitle(getFileStem(entry.name))
+      const mediaEpisode = getEpisodeIdentity(entry.name)
+      let score = 0
+
+      if (subtitleStem === mediaStem) {
+        score = 100_000 + mediaStem.length
+      } else if (
+        mediaStem &&
+        subtitleStem.startsWith(mediaStem) &&
+        /^[\s._\-[({（【]/.test(
+          getFileStem(subtitleEntry.name).slice(getFileStem(entry.name).length),
+        )
+      ) {
+        score = 90_000 + mediaStem.length
+      } else if (subtitleComparable && subtitleComparable === mediaComparable) {
+        score = 80_000 + mediaComparable.length
+      } else if (subtitleEpisode && subtitleEpisode === mediaEpisode) {
+        score = 70_000 + mediaStem.length
+      }
+
+      return { entry, score }
+    })
+    .filter(({ score }) => score > 0)
+    .sort((first, second) => second.score - first.score)
+
+  if (ranked.length > 0 && (ranked.length === 1 || ranked[0].score > ranked[1].score)) {
+    return ranked[0].entry
+  }
+
+  return candidates.length === 1 ? candidates[0] : undefined
+}
+
+export function renderSubtitleFileName(targetMediaName, subtitleName, sourceMediaName) {
+  const mediaExtension = path.posix.extname(String(targetMediaName ?? '').replaceAll('\\', '/'))
+  const subtitleExtension = path.posix.extname(String(subtitleName ?? '').replaceAll('\\', '/'))
+
+  if (!mediaExtension || !subtitleExtension || !isSubtitleFileName(subtitleName)) {
+    return ''
+  }
+
+  const mediaStem = String(targetMediaName).slice(0, -mediaExtension.length)
+  const qualifier = getSubtitleQualifier(subtitleName, sourceMediaName)
+  return `${mediaStem}${qualifier}${subtitleExtension}`
 }
 
 export function parseAiJsonContent(content) {

@@ -182,6 +182,7 @@ describe('OpenStrmBridge shell', () => {
     expect(screen.getByLabelText('API Key')).toBeInTheDocument()
     expect(screen.getByRole('combobox', { name: '模型' })).toBeInTheDocument()
     expect(screen.getByLabelText('自定义请求参数')).toHaveValue('{}')
+    expect(screen.getByLabelText('单次 AI 请求视频上限')).toHaveValue('100')
     expect(screen.getByLabelText('AI 提示词')).toBeInTheDocument()
     expect(screen.getByLabelText('命名规则')).toBeInTheDocument()
     expect(screen.getByRole('switch', { name: '重建 Emby 标准文件夹结构' })).not.toBeChecked()
